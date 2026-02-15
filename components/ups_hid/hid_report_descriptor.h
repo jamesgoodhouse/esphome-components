@@ -70,6 +70,13 @@ class HidReportMap {
    */
   float extract_field_value(const HidField& field, const uint8_t* report_data, size_t report_len) const;
 
+  /**
+   * Extract the raw logical value from report data (no physical conversion,
+   * no unit exponent). Useful when the descriptor has incorrect unit exponents
+   * and the caller wants to apply device-specific scaling instead.
+   */
+  float extract_raw_value(const HidField& field, const uint8_t* report_data, size_t report_len) const;
+
   /** Get all fields (for debugging/logging) */
   const std::vector<HidField>& get_all_fields() const { return fields_; }
 

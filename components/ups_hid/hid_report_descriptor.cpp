@@ -535,6 +535,37 @@ float HidReportMap::extract_field_value(
   return result;
 }
 
+float HidReportMap::extract_raw_value(
+    const HidField& field, const uint8_t* report_data, size_t report_len) const {
+  if (!report_data || report_len == 0) return NAN;
+
+  size_t bit_end = static_cast<size_t>(field.bit_offset) + field.bit_size;
+  size_t byte_end = (bit_end + 7) / 8;
+  if (byte_end > report_len) return NAN;
+
+  // Extract raw bits (little-endian bit ordering)
+  int64_t raw = 0;
+  for (uint16_t b = 0; b < field.bit_size; b++) {
+    size_t bit_idx = field.bit_offset + b;
+    size_t byte_idx = bit_idx / 8;
+    uint8_t bit_in_byte = bit_idx % 8;
+    if (report_data[byte_idx] & (1u << bit_in_byte)) {
+      raw |= (1LL << b);
+    }
+  }
+
+  // Sign-extend if the logical range is signed
+  bool is_signed = (field.logical_min < 0);
+  if (is_signed && field.bit_size > 0 && field.bit_size < 64) {
+    int64_t sign_bit = 1LL << (field.bit_size - 1);
+    if (raw & sign_bit) {
+      raw |= ~((1LL << field.bit_size) - 1);
+    }
+  }
+
+  return static_cast<float>(raw);
+}
+
 // =============================================================================
 // Debug dump
 // =============================================================================
