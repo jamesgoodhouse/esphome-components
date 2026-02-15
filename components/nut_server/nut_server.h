@@ -46,6 +46,12 @@ enum class ClientState {
   DISCONNECTED
 };
 
+// User credential for authentication
+struct UserCredential {
+  std::string username;
+  std::string password;
+};
+
 // NUT client connection
 struct NutClient {
   int socket_fd{-1};
@@ -88,8 +94,15 @@ public:
   // Configuration setters
   void set_ups_hid(ups_hid::UpsHidComponent *ups_hid) { ups_hid_ = ups_hid; }
   void set_port(uint16_t port) { port_ = port; }
-  void set_username(const std::string &username) { username_ = username; }
-  void set_password(const std::string &password) { password_ = password; }
+  void add_user(const std::string &username, const std::string &password) {
+    users_.push_back({username, password});
+  }
+  bool auth_enabled() const {
+    for (const auto &u : users_) {
+      if (!u.password.empty()) return true;
+    }
+    return false;
+  }
   void set_max_clients(uint8_t max_clients) {
     max_clients_ = std::min(max_clients, static_cast<uint8_t>(20));
   }
@@ -165,8 +178,7 @@ private:
   mutable std::mutex clients_mutex_;
 
   // Authentication
-  std::string username_{"nutuser"};
-  std::string password_{"nutpass"};
+  std::vector<UserCredential> users_;
 
   // UPS configuration
   std::string ups_name_{"ups"};

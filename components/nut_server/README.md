@@ -6,7 +6,7 @@ The `nut_server` component exposes UPS data from the `ups_hid` component via the
 
 - **Multi-client TCP Server**: Up to 8 simultaneous connections (configurable to 20)
 - **NUT Protocol v2.8.0**: Compatible with standard NUT clients and monitoring tools
-- **Authentication**: Optional username/password; read-only commands (LIST, GET) work without auth per NUT spec
+- **Multi-user Authentication**: Multiple username/password pairs; read-only commands (LIST, GET) work without auth per NUT spec
 - **Real-time UPS Data**: Exposes live UPS status from the `ups_hid` component
 - **Command Support**: Execute UPS commands like beeper control and battery tests
 - **Thread-safe Design**: Dedicated FreeRTOS server task with mutex-protected client access
@@ -27,15 +27,31 @@ nut_server:
 ### Advanced Configuration
 
 ```yaml
-# Full configuration with all options
+# Full configuration with multiple users
 nut_server:
   ups_hid_id: my_ups           # Required: Reference to ups_hid component
   port: 3493                    # Optional: TCP port (default: 3493)
   ups_name: "office_ups"        # Optional: UPS name in NUT (default: ups_hid ID)
-  username: "nutuser"           # Optional: Username for authentication
-  password: "secretpass"        # Optional: Password (empty = no auth)
   max_clients: 8                # Optional: Max simultaneous clients (1-20, default: 8)
+  users:                         # Optional: List of authorized users
+    - username: "monitor"
+      password: "secret1"
+    - username: "admin"
+      password: "secret2"
 ```
+
+#### Single-User Shorthand (Legacy)
+
+For backward compatibility, you can still use the single-user `username`/`password` keys:
+
+```yaml
+nut_server:
+  ups_hid_id: my_ups
+  username: "nutuser"           # Optional: Username for authentication
+  password: "secretpass"        # Optional: Password (omit or empty = no auth)
+```
+
+> **Note:** You cannot use both `users` and legacy `username`/`password` keys in the same configuration.
 
 ### Complete Example with UPS HID
 
@@ -50,9 +66,12 @@ nut_server:
   ups_hid_id: my_ups
   port: 3493
   ups_name: "esphome_ups"
-  username: "monitor"
-  password: "ups123"
   max_clients: 5
+  users:
+    - username: "monitor"
+      password: "ups123"
+    - username: "ha_nut"
+      password: "ha_secret"
 
 # Optional: Network configuration
 wifi:
