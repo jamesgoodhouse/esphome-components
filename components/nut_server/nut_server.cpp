@@ -468,7 +468,7 @@ void NutServerComponent::handle_login(NutClient &client, const std::string &args
         client.temp_username.clear();
         client.temp_password.clear();
         send_response(client, "OK\n");
-        ESP_LOGD(TAG, "Client authenticated via LOGIN as %s", client.username.c_str());
+        ESP_LOGD(TAG, "Client %s authenticated via LOGIN as %s", client.remote_ip.c_str(), client.username.c_str());
         return;
       }
     }
@@ -483,7 +483,7 @@ void NutServerComponent::handle_login(NutClient &client, const std::string &args
       client.state = ClientState::AUTHENTICATED;
       client.username = parts[0];
       send_response(client, "OK\n");
-      ESP_LOGD(TAG, "Client authenticated as %s (legacy login)", parts[0].c_str());
+      ESP_LOGD(TAG, "Client %s authenticated as %s (legacy login)", client.remote_ip.c_str(), parts[0].c_str());
     } else {
       client.login_attempts++;
       if (client.login_attempts >= MAX_LOGIN_ATTEMPTS) {
@@ -797,7 +797,7 @@ void NutServerComponent::handle_password(NutClient &client, const std::string &a
     client.state = ClientState::AUTHENTICATED;
     client.username = client.temp_username;
     client.login_attempts = 0;
-    ESP_LOGI(TAG, "Client authenticated successfully: %s", client.username.c_str());
+    ESP_LOGI(TAG, "Client %s authenticated successfully as %s", client.remote_ip.c_str(), client.username.c_str());
     send_response(client, "OK\n");
   } else {
     client.login_attempts++;
