@@ -14,55 +14,70 @@ struct PowerData {
   float input_transfer_low{NAN};       // Low transfer voltage threshold (V)
   float input_transfer_high{NAN};      // High transfer voltage threshold (V)
   float frequency{NAN};                // Input frequency (Hz)
-  
+
+  // Input frequency nominal
+  float input_frequency_nominal{NAN};  // Nominal input frequency (Hz)
+
   // Output power metrics
   float output_voltage{NAN};           // Current output voltage (V)
   float output_voltage_nominal{NAN};   // Nominal output voltage (V)
+  float output_current{NAN};           // Current output current (A)
+  float output_frequency{NAN};         // Current output frequency (Hz)
+  float active_power{NAN};             // Live active power draw (W)
   float load_percent{NAN};             // Current load percentage (0-100%)
-  
+
   // Power ratings and capabilities
   float realpower_nominal{NAN};        // Nominal real power rating (W)
   float apparent_power_nominal{NAN};   // Nominal apparent power rating (VA)
-  
+
   // Power status information
   std::string status{};                // Power status text (Online, On Battery, etc.)
-  
+
+  // AVR / power conditioning flags
+  bool boost_active{false};            // AVR boost mode active
+  bool buck_active{false};             // AVR buck mode active
+  bool over_temperature{false};        // Over temperature alarm
+  bool communication_lost{false};      // Communication lost flag
+  bool shutdown_imminent{false};       // UPS will shutdown very soon
+  bool awaiting_power{false};          // UPS waiting for AC power to return
+  bool voltage_out_of_range{false};    // Input voltage out of range
+
   // Power quality indicators
   bool input_voltage_valid() const {
     return !std::isnan(input_voltage) && input_voltage > 50.0f && input_voltage < 300.0f;
   }
-  
+
   bool output_voltage_valid() const {
     return !std::isnan(output_voltage) && output_voltage > 50.0f && output_voltage < 300.0f;
   }
-  
+
   bool frequency_valid() const {
     return !std::isnan(frequency) && frequency >= FREQUENCY_MIN_VALID && frequency <= FREQUENCY_MAX_VALID;
   }
-  
+
   bool is_input_out_of_range() const {
     if (!input_voltage_valid()) return false;
     return (!std::isnan(input_transfer_low) && input_voltage < input_transfer_low) ||
            (!std::isnan(input_transfer_high) && input_voltage > input_transfer_high);
   }
-  
+
   bool is_overloaded() const {
     return !std::isnan(load_percent) && load_percent > 95.0f;
   }
-  
+
   bool has_load_info() const {
     return !std::isnan(load_percent);
   }
-  
+
   // Validation and utility methods
   bool is_valid() const {
     return input_voltage_valid() || output_voltage_valid() || has_load_info();
   }
-  
-  void reset() { 
-    *this = PowerData{}; 
+
+  void reset() {
+    *this = PowerData{};
   }
-  
+
   // Copy constructor and assignment for safe copying
   PowerData() = default;
   PowerData(const PowerData&) = default;

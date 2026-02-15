@@ -84,5 +84,8 @@ private:
     std::map<uint8_t, size_t> report_sizes_;
 };
 
+// Factory creator function declaration
+std::unique_ptr<UpsProtocolBase> create_generic_protocol(UpsHidComponent* parent);
+
 } // namespace ups_hid  
 } // namespace esphome

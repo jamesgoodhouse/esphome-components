@@ -96,5 +96,8 @@ private:
   float parse_frequency_from_report(const HidReport &report);
 };
 
+// Factory creator function declaration
+std::unique_ptr<UpsProtocolBase> create_apc_protocol(UpsHidComponent* parent);
+
 } // namespace ups_hid
 } // namespace esphome
