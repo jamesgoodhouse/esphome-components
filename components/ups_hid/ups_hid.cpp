@@ -435,6 +435,12 @@ void UpsHidComponent::update_sensors() {
       state = ups_data_.power.over_temperature;
     } else if (type == binary_sensor_type::COMMUNICATION_LOST) {
       state = ups_data_.power.communication_lost;
+    } else if (type == binary_sensor_type::SHUTDOWN_IMMINENT) {
+      state = ups_data_.power.shutdown_imminent;
+    } else if (type == binary_sensor_type::AWAITING_POWER) {
+      state = ups_data_.power.awaiting_power;
+    } else if (type == binary_sensor_type::VOLTAGE_OUT_OF_RANGE) {
+      state = ups_data_.power.voltage_out_of_range;
     }
 
     sensor->publish_state(state);

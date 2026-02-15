@@ -680,16 +680,20 @@ const char* HidReportMap::usage_name(uint32_t usage) {
     case HID_USAGE_POW(HID_USAGE_POW_GOOD): return "Good";
     case HID_USAGE_POW(HID_USAGE_POW_INTERNAL_FAILURE): return "InternalFailure";
     case HID_USAGE_POW(HID_USAGE_POW_VOLTAGE_OUT_OF_RANGE): return "VoltageOutOfRange";
-    case HID_USAGE_POW(0x0064): return "FrequencyOutOfRange";
+    case HID_USAGE_POW(HID_USAGE_POW_FREQUENCY_OUT_OF_RANGE): return "FrequencyOutOfRange";
     case HID_USAGE_POW(HID_USAGE_POW_OVERLOAD): return "Overload";
     case HID_USAGE_POW(HID_USAGE_POW_OVER_CHARGED): return "OverCharged";
     case HID_USAGE_POW(HID_USAGE_POW_OVER_TEMPERATURE): return "OverTemperature";
     case HID_USAGE_POW(HID_USAGE_POW_SHUTDOWN_REQUESTED): return "ShutdownRequested";
     case HID_USAGE_POW(HID_USAGE_POW_SHUTDOWN_IMMINENT): return "ShutdownImminent";
-    case HID_USAGE_POW(0x006B): return "SwitchOn/Off";
-    case HID_USAGE_POW(0x006C): return "Switchable";
+    case HID_USAGE_POW(HID_USAGE_POW_SWITCH_ON_OFF): return "SwitchOn/Off";
+    case HID_USAGE_POW(HID_USAGE_POW_SWITCHABLE): return "Switchable";
+    case HID_USAGE_POW(HID_USAGE_POW_USED): return "Used";
     case HID_USAGE_POW(HID_USAGE_POW_BOOST): return "Boost";
     case HID_USAGE_POW(HID_USAGE_POW_BUCK): return "Buck";
+    case HID_USAGE_POW(HID_USAGE_POW_INITIALIZED): return "Initialized";
+    case HID_USAGE_POW(HID_USAGE_POW_TESTED): return "Tested";
+    case HID_USAGE_POW(HID_USAGE_POW_AWAITING_POWER): return "AwaitingPower";
     case HID_USAGE_POW(HID_USAGE_POW_COMMUNICATION_LOST): return "CommunicationLost";
     // String descriptors
     case HID_USAGE_POW(HID_USAGE_POW_I_MANUFACTURER): return "iManufacturer";
@@ -714,14 +718,37 @@ const char* HidReportMap::usage_name(uint32_t usage) {
     case HID_USAGE_BAT(HID_USAGE_BAT_AVERAGE_TIME_TO_FULL): return "AverageTimeToFull";
     case HID_USAGE_BAT(HID_USAGE_BAT_DESIGN_CAPACITY): return "DesignCapacity";
     case HID_USAGE_BAT(HID_USAGE_BAT_MANUFACTURE_DATE): return "ManufactureDate";
-    case HID_USAGE_BAT(HID_USAGE_BAT_CONFIG_VOLTAGE): return "ConfigVoltage";
+    case HID_USAGE_BAT(HID_USAGE_BAT_RECHARGEABLE): return "Rechargeable";
     case HID_USAGE_BAT(HID_USAGE_BAT_I_MANUFACTURER_NAME): return "iManufacturerName";
     case HID_USAGE_BAT(HID_USAGE_BAT_I_DEVICE_NAME): return "iDeviceName";
     case HID_USAGE_BAT(HID_USAGE_BAT_I_DEVICE_CHEMISTRY): return "iDeviceChemistry";
     case HID_USAGE_BAT(HID_USAGE_BAT_WARNING_CAPACITY_LIMIT): return "WarningCapacityLimit";
     case HID_USAGE_BAT(0x008D): return "CapacityGranularity1";
     case HID_USAGE_BAT(0x008E): return "CapacityGranularity2";
-    case HID_USAGE_BAT(0x008F): return "iOEMInformation";
+    case HID_USAGE_BAT(HID_USAGE_BAT_I_OEM_INFORMATION): return "iOEMInformation";
+    case HID_USAGE_BAT(HID_USAGE_BAT_AC_PRESENT): return "ACPresent";
+    case HID_USAGE_BAT(HID_USAGE_BAT_BATTERY_PRESENT): return "BatteryPresent";
+    default: break;
+  }
+
+  // Tripp Lite Vendor-Specific Page (0xFFFF)
+  switch (usage) {
+    case HID_USAGE_TL(HID_USAGE_TL_CUSTOM): return "TL:Custom";
+    case HID_USAGE_TL(HID_USAGE_TL_DELAY_BEFORE_STARTUP): return "TL:DelayBeforeStartup";
+    case HID_USAGE_TL(HID_USAGE_TL_LOW_VOLTAGE_TRANSFER_MAX): return "TL:LowVoltageTransferMax";
+    case HID_USAGE_TL(HID_USAGE_TL_LOW_VOLTAGE_TRANSFER_MIN): return "TL:LowVoltageTransferMin";
+    case HID_USAGE_TL(HID_USAGE_TL_HIGH_VOLTAGE_TRANSFER_MAX): return "TL:HighVoltageTransferMax";
+    case HID_USAGE_TL(HID_USAGE_TL_HIGH_VOLTAGE_TRANSFER_MIN): return "TL:HighVoltageTransferMin";
+    case HID_USAGE_TL(HID_USAGE_TL_OUTLET_STATE): return "TL:OutletState";
+    case HID_USAGE_TL(HID_USAGE_TL_OUTLET_COUNT): return "TL:OutletCount";
+    case HID_USAGE_TL(HID_USAGE_TL_UPS_FIRMWARE_VERSION): return "TL:FirmwareVersion";
+    case HID_USAGE_TL(HID_USAGE_TL_COMM_PROTOCOL_VERSION): return "TL:CommProtocolVersion";
+    case HID_USAGE_TL(HID_USAGE_TL_COMM_VERSION): return "TL:CommVersion";
+    case HID_USAGE_TL(HID_USAGE_TL_I_UPS_PART_NUMBER): return "TL:iPartNumber";
+    case HID_USAGE_TL(HID_USAGE_TL_AUTO_ON_DELAY): return "TL:AutoOnDelay";
+    case HID_USAGE_TL(HID_USAGE_TL_WATCHDOG): return "TL:Watchdog";
+    case HID_USAGE_TL(HID_USAGE_TL_OUTLETS_AVAILABLE_MASK): return "TL:OutletsAvailMask";
+    case HID_USAGE_TL(HID_USAGE_TL_OUTLETS_STATUS_MASK): return "TL:OutletsStatusMask";
     default: break;
   }
 

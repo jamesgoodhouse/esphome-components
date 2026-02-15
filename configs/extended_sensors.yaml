@@ -234,6 +234,20 @@ text_sensor:
 
   - platform: ups_hid
     ups_hid_id: ups_monitor
+    name: "Battery Manufacture Date"
+    id: battery_mfr_date
+    type: battery_mfr_date
+    icon: "mdi:calendar-clock"
+
+  - platform: ups_hid
+    ups_hid_id: ups_monitor
+    name: "Battery Type"
+    id: battery_type
+    type: battery_type
+    icon: "mdi:battery-charging"
+
+  - platform: ups_hid
+    ups_hid_id: ups_monitor
     name: "Battery Status"
     id: battery_status
     type: battery_status

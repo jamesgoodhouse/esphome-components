@@ -614,12 +614,23 @@ bool TrippLiteProtocol::read_data_descriptor(UpsData &data) {
         data.battery.voltage_nominal = bat_voltage_nom;
     }
 
-    // Battery config voltage (BatterySystem page ConfigVoltage, 0x85:0x008B)
-    float bat_config_voltage = read_usage_value(map, report_cache,
-        HID_USAGE_BAT(HID_USAGE_BAT_CONFIG_VOLTAGE), "battery.config_voltage");
+    // Battery config voltage: look for PowerDevice:ConfigVoltage (0x0040) scoped
+    // to the BatterySystem collection, like NUT does with path
+    // "UPS.BatterySystem.Battery.ConfigVoltage". This is NOT 0x85:0x008B
+    // (which is actually Rechargeable, a boolean flag).
+    float bat_config_voltage = read_usage_in_collection(map, report_cache,
+        HID_USAGE_POW(HID_USAGE_POW_CONFIG_VOLTAGE),
+        HID_USAGE_POW(HID_USAGE_POW_BATTERY_SYSTEM),
+        "battery.config_voltage");
+    if (std::isnan(bat_config_voltage)) {
+        // Also try Battery (0x0012) collection
+        bat_config_voltage = read_usage_in_collection(map, report_cache,
+            HID_USAGE_POW(HID_USAGE_POW_CONFIG_VOLTAGE),
+            HID_USAGE_POW(HID_USAGE_POW_BATTERY),
+            "battery.config_voltage.alt");
+    }
     if (!std::isnan(bat_config_voltage) && bat_config_voltage >= 6.0f && bat_config_voltage <= 60.0f) {
         data.battery.config_voltage = bat_config_voltage;
-        // Use as fallback for battery voltage nominal if collection lookup failed
         if (std::isnan(data.battery.voltage_nominal)) {
             data.battery.voltage_nominal = bat_config_voltage;
         }
@@ -640,12 +651,31 @@ bool TrippLiteProtocol::read_data_descriptor(UpsData &data) {
     }
 
     // Charging/Discharging/FullyCharged status flags
+    // Standard location: BatterySystem page (0x85)
     float charging = read_usage_value(map, report_cache,
         HID_USAGE_BAT(HID_USAGE_BAT_CHARGING), "battery.charging");
     float discharging = read_usage_value(map, report_cache,
         HID_USAGE_BAT(HID_USAGE_BAT_DISCHARGING), "battery.discharging");
     float fully_charged = read_usage_value(map, report_cache,
         HID_USAGE_BAT(HID_USAGE_BAT_FULLY_CHARGED), "battery.fully_charged");
+
+    // Tripp Lite page-confusion fallback: some TL devices put these on page 0x84
+    if (std::isnan(charging)) {
+        charging = read_usage_value(map, report_cache,
+            HID_USAGE_POW(HID_USAGE_TL_CHARGING), "battery.charging.p84");
+    }
+    if (std::isnan(discharging)) {
+        discharging = read_usage_value(map, report_cache,
+            HID_USAGE_POW(HID_USAGE_TL_DISCHARGING), "battery.discharging.p84");
+    }
+
+    // AC Present flag (standard on 0x85, TL also puts it on 0x84)
+    float ac_present = read_usage_value(map, report_cache,
+        HID_USAGE_BAT(HID_USAGE_BAT_AC_PRESENT), "ups.status.ac_present");
+    if (std::isnan(ac_present)) {
+        ac_present = read_usage_value(map, report_cache,
+            HID_USAGE_POW(HID_USAGE_TL_AC_PRESENT), "ups.status.ac_present.p84");
+    }
 
     if (!std::isnan(discharging) && discharging > 0) {
         data.battery.status = battery_status::DISCHARGING;
@@ -660,9 +690,13 @@ bool TrippLiteProtocol::read_data_descriptor(UpsData &data) {
     float fully_discharged = read_usage_value(map, report_cache,
         HID_USAGE_BAT(HID_USAGE_BAT_FULLY_DISCHARGED), "battery.fully_discharged");
 
-    // Need replacement flag
+    // Need replacement flag (standard on 0x85, TL also puts on 0x84)
     float need_replace = read_usage_value(map, report_cache,
         HID_USAGE_BAT(HID_USAGE_BAT_NEED_REPLACEMENT), "battery.need_replacement");
+    if (std::isnan(need_replace)) {
+        need_replace = read_usage_value(map, report_cache,
+            HID_USAGE_POW(HID_USAGE_TL_NEED_REPLACEMENT), "battery.need_replacement.p84");
+    }
     if (!std::isnan(need_replace) && need_replace > 0) {
         data.battery.needs_replacement = true;
     }
@@ -815,8 +849,10 @@ bool TrippLiteProtocol::read_data_descriptor(UpsData &data) {
         HID_USAGE_POW(HID_USAGE_POW_INTERNAL_FAILURE), "ups.status.internal_failure");
     float voltage_oor = read_usage_value(map, report_cache,
         HID_USAGE_POW(HID_USAGE_POW_VOLTAGE_OUT_OF_RANGE), "ups.status.voltage_oor");
-    float shutdown_imminent = read_usage_value(map, report_cache,
+    float shutdown_imminent_val = read_usage_value(map, report_cache,
         HID_USAGE_POW(HID_USAGE_POW_SHUTDOWN_IMMINENT), "ups.status.shutdown_imminent");
+    float awaiting_power = read_usage_value(map, report_cache,
+        HID_USAGE_POW(HID_USAGE_POW_AWAITING_POWER), "ups.status.awaiting_power");
 
     // AVR status flags
     float boost_val = read_usage_value(map, report_cache,
@@ -832,17 +868,22 @@ bool TrippLiteProtocol::read_data_descriptor(UpsData &data) {
     data.power.buck_active = (!std::isnan(buck_val) && buck_val > 0);
     data.power.over_temperature = (!std::isnan(overtemp_val) && overtemp_val > 0);
     data.power.communication_lost = (!std::isnan(commlost_val) && commlost_val > 0);
+    data.power.shutdown_imminent = (!std::isnan(shutdown_imminent_val) && shutdown_imminent_val > 0);
+    data.power.awaiting_power = (!std::isnan(awaiting_power) && awaiting_power > 0);
+    data.power.voltage_out_of_range = (!std::isnan(voltage_oor) && voltage_oor > 0);
 
     // Determine power status (input_voltage is already scaled/converted at this point)
     if (data.power.status.empty()) {
         if (!std::isnan(discharging) && discharging > 0) {
             data.power.status = status::ON_BATTERY;
+        } else if (!std::isnan(ac_present) && ac_present > 0) {
+            data.power.status = status::ONLINE;
         } else if (!std::isnan(data.power.input_voltage) && data.power.input_voltage > 10.0f) {
             data.power.status = status::ONLINE;
         } else if (!std::isnan(present) && present > 0) {
             data.power.status = status::ONLINE;
         } else if (!std::isnan(data.power.output_voltage) && data.power.output_voltage > 10.0f) {
-            data.power.status = status::ONLINE;  // Output present, assume online
+            data.power.status = status::ONLINE;
         } else {
             data.power.status = status::UNKNOWN;
         }
@@ -942,6 +983,59 @@ bool TrippLiteProtocol::read_data_descriptor(UpsData &data) {
         HID_USAGE_BAT(HID_USAGE_BAT_WARNING_CAPACITY_LIMIT), "battery.charge.warning");
     if (!std::isnan(warning_cap)) {
         data.battery.charge_warning = warning_cap;
+    }
+
+    // --- Tripp Lite vendor-specific fields (page 0xFFFF) ---
+    // UPS Firmware version (FFFF:007C) - value is a firmware revision number
+    float fw_version_raw = read_usage_value(map, report_cache,
+        HID_USAGE_TL(HID_USAGE_TL_UPS_FIRMWARE_VERSION), "ups.firmware.version");
+    if (!std::isnan(fw_version_raw) && fw_version_raw > 0) {
+        int fw_int = static_cast<int>(fw_version_raw);
+        // Tripp Lite firmware version is typically a small integer (e.g. 161)
+        // Format it with a decimal point: 161 -> "1.61", 200 -> "2.00"
+        if (fw_int >= 100 && fw_int < 10000) {
+            char fw_buf[16];
+            snprintf(fw_buf, sizeof(fw_buf), "%d.%02d", fw_int / 100, fw_int % 100);
+            data.device.firmware_version = fw_buf;
+        } else {
+            data.device.firmware_version = std::to_string(fw_int);
+        }
+        ESP_LOGD(TL_TAG, "Firmware version: %s (raw: %d)", data.device.firmware_version.c_str(), fw_int);
+    }
+
+    // Communication protocol version (FFFF:007D) - matches product ID
+    float comm_proto = read_usage_value(map, report_cache,
+        HID_USAGE_TL(HID_USAGE_TL_COMM_PROTOCOL_VERSION), "ups.comm.protocol");
+    if (!std::isnan(comm_proto) && comm_proto > 0) {
+        ESP_LOGD(TL_TAG, "Comm protocol version: 0x%04X (PID: 0x%04X)",
+                 static_cast<int>(comm_proto), parent_->get_product_id());
+    }
+
+    // Watchdog timer (FFFF:0092) - read for logging
+    float watchdog_val = read_usage_value(map, report_cache,
+        HID_USAGE_TL(HID_USAGE_TL_WATCHDOG), "ups.watchdog");
+    if (!std::isnan(watchdog_val)) {
+        ESP_LOGD(TL_TAG, "Watchdog timer: %d", static_cast<int>(watchdog_val));
+    }
+
+    // --- Manufacture date (USB HID packed format) ---
+    float mfr_date_raw = read_usage_value(map, report_cache,
+        HID_USAGE_BAT(HID_USAGE_BAT_MANUFACTURE_DATE), "battery.mfr_date");
+    if (!std::isnan(mfr_date_raw) && mfr_date_raw > 0) {
+        // USB HID ManufactureDate is packed: (year-1980)*512 + month*32 + day
+        uint16_t date_packed = static_cast<uint16_t>(mfr_date_raw);
+        int year = ((date_packed >> 9) & 0x7F) + 1980;
+        int month = (date_packed >> 5) & 0x0F;
+        int day = date_packed & 0x1F;
+        if (year >= 1980 && year <= 2100 && month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+            char date_buf[16];
+            snprintf(date_buf, sizeof(date_buf), "%04d-%02d-%02d", year, month, day);
+            data.battery.mfr_date = date_buf;
+            ESP_LOGD(TL_TAG, "Manufacture date: %s (packed: 0x%04X)", date_buf, date_packed);
+        } else {
+            ESP_LOGD(TL_TAG, "Manufacture date packed value 0x%04X decodes to invalid date %d-%d-%d",
+                     date_packed, year, month, day);
+        }
     }
 
     // Set USB identification

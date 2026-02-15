@@ -215,6 +215,9 @@ namespace binary_sensor_type {
     static constexpr const char* BYPASS_ACTIVE = "bypass_active";
     static constexpr const char* OVER_TEMPERATURE = "over_temperature";
     static constexpr const char* COMMUNICATION_LOST = "communication_lost";
+    static constexpr const char* SHUTDOWN_IMMINENT = "shutdown_imminent";
+    static constexpr const char* AWAITING_POWER = "awaiting_power";
+    static constexpr const char* VOLTAGE_OUT_OF_RANGE = "voltage_out_of_range";
 }
 
 // ==================== Text Sensor Type Identifiers ====================

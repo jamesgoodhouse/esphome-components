@@ -139,3 +139,24 @@ binary_sensor:
     id: communication_lost
     type: communication_lost
     device_class: problem
+
+  - platform: ups_hid
+    ups_hid_id: ups_monitor
+    name: "Shutdown Imminent"
+    id: shutdown_imminent
+    type: shutdown_imminent
+    device_class: problem
+
+  - platform: ups_hid
+    ups_hid_id: ups_monitor
+    name: "Awaiting Power"
+    id: awaiting_power
+    type: awaiting_power
+    device_class: power
+
+  - platform: ups_hid
+    ups_hid_id: ups_monitor
+    name: "Voltage Out of Range"
+    id: voltage_out_of_range
+    type: voltage_out_of_range
+    device_class: problem

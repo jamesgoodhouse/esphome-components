@@ -506,7 +506,7 @@ void NutServerComponent::handle_list_var(NutClient &client, const std::string &a
   // Standard NUT variables mapping to actual UPS data
   // Comprehensive list matching what NUT's usbhid-ups driver reports
   std::vector<std::string> variables = {
-    "battery.capacity", "battery.charge", "battery.runtime", "battery.type",
+    "battery.capacity", "battery.charge", "battery.mfr.date", "battery.runtime", "battery.type",
     "battery.voltage", "battery.voltage.low", "battery.voltage.nominal",
     "device.mfr", "device.model", "device.type",
     "input.frequency", "input.voltage", "input.voltage.nominal",
@@ -913,6 +913,9 @@ std::string NutServerComponent::get_ups_var(const std::string &var_name) {
     if (var_name == "battery.type" && !ups_data.battery.type.empty()) {
       return ups_data.battery.type;
     }
+    if (var_name == "battery.mfr.date" && !ups_data.battery.mfr_date.empty()) {
+      return ups_data.battery.mfr_date;
+    }
     if (var_name == "battery.voltage.low" && !std::isnan(ups_data.battery.config_voltage)) {
       return format_nut_value(std::to_string(ups_data.battery.config_voltage));
     }
@@ -1165,6 +1168,18 @@ std::string NutServerComponent::get_ups_status() const {
   if (ups_data.power.over_temperature) {
     if (!status.empty()) status += " ";
     status += "OVER";
+  }
+  if (ups_data.power.shutdown_imminent) {
+    if (!status.empty()) status += " ";
+    status += "FSD";  // Forced Shutdown (NUT standard for shutdown imminent)
+  }
+  if (ups_data.power.awaiting_power) {
+    if (!status.empty()) status += " ";
+    status += "OFF";  // UPS is off, waiting for power to return
+  }
+  if (ups_data.battery.needs_replacement) {
+    if (!status.empty()) status += " ";
+    status += "RB";  // Replace Battery
   }
 
   if (ups_hid_->has_fault()) {

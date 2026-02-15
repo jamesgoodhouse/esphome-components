@@ -54,6 +54,15 @@ BINARY_SENSOR_TYPES = {
     "communication_lost": {
         "device_class": DEVICE_CLASS_PROBLEM,
     },
+    "shutdown_imminent": {
+        "device_class": DEVICE_CLASS_PROBLEM,
+    },
+    "awaiting_power": {
+        "device_class": DEVICE_CLASS_POWER,
+    },
+    "voltage_out_of_range": {
+        "device_class": DEVICE_CLASS_PROBLEM,
+    },
 }
 
 

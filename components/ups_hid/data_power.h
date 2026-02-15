@@ -38,6 +38,9 @@ struct PowerData {
   bool buck_active{false};             // AVR buck mode active
   bool over_temperature{false};        // Over temperature alarm
   bool communication_lost{false};      // Communication lost flag
+  bool shutdown_imminent{false};       // UPS will shutdown very soon
+  bool awaiting_power{false};          // UPS waiting for AC power to return
+  bool voltage_out_of_range{false};    // Input voltage out of range
 
   // Power quality indicators
   bool input_voltage_valid() const {
