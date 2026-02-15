@@ -610,14 +610,14 @@ bool TrippLiteProtocol::read_data_descriptor(UpsData &data) {
         HID_USAGE_POW(HID_USAGE_POW_CONFIG_VOLTAGE),
         HID_USAGE_BAT(0x0012),  // Battery collection
         "battery.voltage.nominal");
-    if (!std::isnan(bat_voltage_nom) && bat_voltage_nom >= 1.0f && bat_voltage_nom <= 60.0f) {
+    if (!std::isnan(bat_voltage_nom) && bat_voltage_nom >= 6.0f && bat_voltage_nom <= 60.0f) {
         data.battery.voltage_nominal = bat_voltage_nom;
     }
 
     // Battery config voltage (BatterySystem page ConfigVoltage, 0x85:0x008B)
     float bat_config_voltage = read_usage_value(map, report_cache,
         HID_USAGE_BAT(HID_USAGE_BAT_CONFIG_VOLTAGE), "battery.config_voltage");
-    if (!std::isnan(bat_config_voltage) && bat_config_voltage >= 1.0f && bat_config_voltage <= 60.0f) {
+    if (!std::isnan(bat_config_voltage) && bat_config_voltage >= 6.0f && bat_config_voltage <= 60.0f) {
         data.battery.config_voltage = bat_config_voltage;
         // Use as fallback for battery voltage nominal if collection lookup failed
         if (std::isnan(data.battery.voltage_nominal)) {
@@ -1231,18 +1231,72 @@ bool TrippLiteProtocol::read_data_heuristic(UpsData &data) {
 void TrippLiteProtocol::read_device_information(UpsData &data) {
     ESP_LOGD(TL_TAG, "Reading Tripp Lite device information...");
 
-    // Tripp Lite USB string descriptor layout (observed on ECO850LCD, PID 0x3024):
+    // The HID report descriptor contains iManufacturer, iProduct, and iSerialNumber
+    // fields whose VALUES are USB string descriptor indices. We read those HID reports
+    // to discover the correct string descriptor indices, rather than hardcoding them.
+    //
+    // Fallback indices (common for Tripp Lite):
     //   Index 1: Product name (e.g., "ECO850LCD")
     //   Index 2: Manufacturer (e.g., "Tripp Lite")
     //   Index 3: Serial number (may be empty on some models)
-    //   Index 4: Battery chemistry (e.g., "PbAc" = Lead Acid)
-    // NUT's tripplite_format_mfr/model/serial use the USB device descriptor fields.
+
+    int mfr_idx = 2;      // Default manufacturer string descriptor index
+    int product_idx = 1;   // Default product string descriptor index
+    int serial_idx = 3;    // Default serial string descriptor index
+    int chemistry_idx = -1; // No default; discovered from HID descriptor
+
+    // Try to read the actual string descriptor indices from HID reports
+    const HidReportMap* map = parent_->get_report_map();
+    if (map && use_descriptor_) {
+        for (const auto& f : map->get_all_fields()) {
+            if (f.usage == HID_USAGE_POW(HID_USAGE_POW_I_MANUFACTURER)) {
+                HidReport report;
+                if (read_hid_report(f.report_id, report) && !report.data.empty()) {
+                    int idx = static_cast<int>(map->extract_raw_value(f, report.data.data(), report.data.size()));
+                    if (idx > 0 && idx < 256) {
+                        mfr_idx = idx;
+                        ESP_LOGD(TL_TAG, "HID iManufacturer index: %d (report 0x%02X)", idx, f.report_id);
+                    }
+                }
+            } else if (f.usage == HID_USAGE_POW(HID_USAGE_POW_I_PRODUCT)) {
+                HidReport report;
+                if (read_hid_report(f.report_id, report) && !report.data.empty()) {
+                    int idx = static_cast<int>(map->extract_raw_value(f, report.data.data(), report.data.size()));
+                    if (idx > 0 && idx < 256) {
+                        product_idx = idx;
+                        ESP_LOGD(TL_TAG, "HID iProduct index: %d (report 0x%02X)", idx, f.report_id);
+                    }
+                }
+            } else if (f.usage == HID_USAGE_POW(HID_USAGE_POW_I_SERIAL_NUMBER)) {
+                HidReport report;
+                if (read_hid_report(f.report_id, report) && !report.data.empty()) {
+                    int idx = static_cast<int>(map->extract_raw_value(f, report.data.data(), report.data.size()));
+                    if (idx > 0 && idx < 256) {
+                        serial_idx = idx;
+                        ESP_LOGD(TL_TAG, "HID iSerialNumber index: %d (report 0x%02X)", idx, f.report_id);
+                    }
+                }
+            } else if (f.usage == HID_USAGE_BAT(HID_USAGE_BAT_I_DEVICE_CHEMISTRY)) {
+                HidReport report;
+                if (read_hid_report(f.report_id, report) && !report.data.empty()) {
+                    int idx = static_cast<int>(map->extract_raw_value(f, report.data.data(), report.data.size()));
+                    if (idx > 0 && idx < 256) {
+                        chemistry_idx = idx;
+                        ESP_LOGD(TL_TAG, "HID iDeviceChemistry index: %d (report 0x%02X)", idx, f.report_id);
+                    }
+                }
+            }
+        }
+    }
+
+    ESP_LOGI(TL_TAG, "String descriptor indices: mfr=%d, product=%d, serial=%d, chemistry=%d",
+             mfr_idx, product_idx, serial_idx, chemistry_idx);
 
     std::string str_val;
     esp_err_t ret;
 
-    // Manufacturer: string descriptor index 2
-    ret = parent_->get_string_descriptor(2, str_val);
+    // Manufacturer
+    ret = parent_->get_string_descriptor(mfr_idx, str_val);
     if (ret == ESP_OK && !str_val.empty()) {
         data.device.manufacturer = str_val;
         ESP_LOGI(TL_TAG, "Manufacturer: \"%s\"", data.device.manufacturer.c_str());
@@ -1251,8 +1305,8 @@ void TrippLiteProtocol::read_device_information(UpsData &data) {
         ESP_LOGD(TL_TAG, "Using default manufacturer: Tripp Lite");
     }
 
-    // Model/product: string descriptor index 1
-    ret = parent_->get_string_descriptor(1, str_val);
+    // Model/product
+    ret = parent_->get_string_descriptor(product_idx, str_val);
     if (ret == ESP_OK && !str_val.empty()) {
         data.device.model = str_val;
         ESP_LOGI(TL_TAG, "Model: \"%s\"", data.device.model.c_str());
@@ -1262,20 +1316,43 @@ void TrippLiteProtocol::read_device_information(UpsData &data) {
         data.device.model = model_str;
     }
 
-    // Serial number: string descriptor index 3
-    // Note: index 4 is battery chemistry on Tripp Lite, NOT serial!
-    ret = parent_->get_string_descriptor(3, str_val);
+    // Serial number
+    ret = parent_->get_string_descriptor(serial_idx, str_val);
     if (ret == ESP_OK && !str_val.empty()) {
-        data.device.serial_number = str_val;
-        ESP_LOGI(TL_TAG, "Serial: \"%s\"", data.device.serial_number.c_str());
+        // Validate: serial should not match manufacturer or product name
+        if (str_val != data.device.manufacturer && str_val != data.device.model) {
+            data.device.serial_number = str_val;
+            ESP_LOGI(TL_TAG, "Serial: \"%s\"", data.device.serial_number.c_str());
+        } else {
+            ESP_LOGW(TL_TAG, "Serial at index %d matches manufacturer/model (\"%s\"), scanning for actual serial...",
+                     serial_idx, str_val.c_str());
+            // Scan nearby indices for a real serial number
+            bool found_serial = false;
+            for (int try_idx = 1; try_idx <= 8 && !found_serial; try_idx++) {
+                if (try_idx == mfr_idx || try_idx == product_idx || try_idx == serial_idx) continue;
+                ret = parent_->get_string_descriptor(try_idx, str_val);
+                if (ret == ESP_OK && !str_val.empty() &&
+                    str_val != data.device.manufacturer && str_val != data.device.model) {
+                    data.device.serial_number = str_val;
+                    ESP_LOGI(TL_TAG, "Serial found at index %d: \"%s\"", try_idx, str_val.c_str());
+                    found_serial = true;
+                }
+            }
+            if (!found_serial) {
+                ESP_LOGW(TL_TAG, "No unique serial number found in string descriptors");
+            }
+        }
     } else {
-        ESP_LOGD(TL_TAG, "No serial number available");
+        ESP_LOGD(TL_TAG, "No serial number at index %d", serial_idx);
     }
 
-    // Battery chemistry: string descriptor index 4
-    // On Tripp Lite devices, this returns the chemistry directly as a string
-    // (e.g., "PbAc" for Lead Acid). No need to read a HID report for string index.
-    ret = parent_->get_string_descriptor(4, str_val);
+    // Battery chemistry
+    if (chemistry_idx > 0) {
+        ret = parent_->get_string_descriptor(chemistry_idx, str_val);
+    } else {
+        // Fallback: try index 4 (common Tripp Lite convention)
+        ret = parent_->get_string_descriptor(4, str_val);
+    }
     if (ret == ESP_OK && !str_val.empty()) {
         data.battery.type = str_val;
         ESP_LOGI(TL_TAG, "Battery type: \"%s\"", data.battery.type.c_str());
