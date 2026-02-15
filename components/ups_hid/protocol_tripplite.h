@@ -78,6 +78,14 @@ private:
     // === Strategy selection ===
     bool use_descriptor_{false};  // true = descriptor-based, false = heuristic
 
+    // When true, descriptor mode uses raw logical value extraction (skipping
+    // the descriptor's unit exponent and physical conversion) because the
+    // device's descriptor has incorrect exponents. Device-specific scaling
+    // (descriptor_voltage_scale_ / descriptor_frequency_scale_) is applied instead.
+    bool descriptor_needs_raw_extraction_{false};
+    double descriptor_voltage_scale_{1.0};   // Applied to measured voltages in descriptor mode
+    double descriptor_frequency_scale_{1.0}; // Applied to measured frequencies in descriptor mode
+
     // === Heuristic mode state ===
     // Scaling factors (determined by product ID, matching NUT tripplite-hid.c)
     double battery_scale_{0.1};

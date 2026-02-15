@@ -107,6 +107,9 @@ bool TrippLiteProtocol::initialize() {
     report_sizes_.clear();
     device_info_read_ = false;
     use_descriptor_ = false;
+    descriptor_needs_raw_extraction_ = false;
+    descriptor_voltage_scale_ = 1.0;
+    descriptor_frequency_scale_ = 1.0;
 
     // Always determine scaling factors (needed for both modes)
     determine_scaling_factors();
@@ -190,14 +193,18 @@ void TrippLiteProtocol::determine_scaling_factors() {
         battery_scale_ = 0.1;
     }
     // PID 0x3016 (SMART1500LCDT newer) and 0x3024 (AVR750U newer / ECO850LCD)
-    // These devices report voltage in centivolts and frequency in centihertz.
-    // The HID descriptor has incorrect unit exponents, so we extract raw values
-    // and apply our own scaling: divide by 100 for voltage and frequency.
+    // These devices have HID descriptors with incorrect unit exponents.
+    // Heuristic scaling stays at 1.0 (auto-detection handles ranges).
+    // Descriptor mode uses raw extraction with device-specific scaling.
     else if (pid == 0x3016 || pid == 0x3024) {
         battery_scale_ = 1.0;
-        io_voltage_scale_ = 0.01;     // Raw values are in centivolts (12070 → 120.7V)
-        io_frequency_scale_ = 0.01;   // Raw values are in centihertz (6020 → 60.2Hz)
+        io_voltage_scale_ = 1.0;
+        io_frequency_scale_ = 1.0;
         io_current_scale_ = 1.0;
+        // Descriptor-specific: raw logical values are in decivolts/decihertz
+        descriptor_needs_raw_extraction_ = true;
+        descriptor_voltage_scale_ = 0.1;    // 1207 → 120.7V
+        descriptor_frequency_scale_ = 0.1;  // 602 → 60.2Hz
     }
     // PID 0x3xxx series (SMART models, newer) - no battery scaling
     else if (pid >= 0x3000 && pid <= 0x3FFF) {
@@ -446,13 +453,18 @@ float TrippLiteProtocol::read_usage_value(
         return NAN;
     }
 
-    // Use raw value extraction (no unit exponent / physical conversion)
-    // because Tripp Lite descriptors have incorrect unit exponents.
-    // We apply our own device-specific scaling instead.
-    float val = map->extract_raw_value(*field, it->second.data(), it->second.size());
+    float val;
+    if (descriptor_needs_raw_extraction_) {
+        // Device has incorrect descriptor exponents; use raw logical value
+        val = map->extract_raw_value(*field, it->second.data(), it->second.size());
+    } else {
+        // Device has correct descriptor; use full conversion (physical + exponent)
+        val = map->extract_field_value(*field, it->second.data(), it->second.size());
+    }
     if (!std::isnan(val)) {
-        ESP_LOGD(TL_TAG, "%s = %.2f (report 0x%02X, bits %u@%u, raw)",
-                 name, val, field->report_id, field->bit_size, field->bit_offset);
+        ESP_LOGD(TL_TAG, "%s = %.2f (report 0x%02X, bits %u@%u, %s)",
+                 name, val, field->report_id, field->bit_size, field->bit_offset,
+                 descriptor_needs_raw_extraction_ ? "raw" : "converted");
     }
     return val;
 }
@@ -489,11 +501,16 @@ float TrippLiteProtocol::read_usage_in_collection(
         return NAN;
     }
 
-    // Use raw value extraction (no unit exponent / physical conversion)
-    float val = map->extract_raw_value(*field, it->second.data(), it->second.size());
+    float val;
+    if (descriptor_needs_raw_extraction_) {
+        val = map->extract_raw_value(*field, it->second.data(), it->second.size());
+    } else {
+        val = map->extract_field_value(*field, it->second.data(), it->second.size());
+    }
     if (!std::isnan(val)) {
-        ESP_LOGD(TL_TAG, "%s = %.2f (report 0x%02X, collection 0x%08lX, raw)",
-                 name, val, field->report_id, (unsigned long)collection_usage);
+        ESP_LOGD(TL_TAG, "%s = %.2f (report 0x%02X, collection 0x%08lX, %s)",
+                 name, val, field->report_id, (unsigned long)collection_usage,
+                 descriptor_needs_raw_extraction_ ? "raw" : "converted");
     }
     return val;
 }
@@ -550,7 +567,7 @@ bool TrippLiteProtocol::read_data_descriptor(UpsData &data) {
 
     // Battery voltage - look in BatterySystem.Battery collection first
     // Battery voltage uses a different range (12V/24V) than AC voltage, so
-    // try raw value first, then try with AC voltage scaling
+    // try value as-is first, then try with descriptor voltage scaling
     float bat_voltage = read_usage_in_collection(map, report_cache,
         HID_USAGE_POW(HID_USAGE_POW_VOLTAGE),
         HID_USAGE_BAT(0x0012),  // Battery collection
@@ -558,9 +575,10 @@ bool TrippLiteProtocol::read_data_descriptor(UpsData &data) {
     if (!std::isnan(bat_voltage)) {
         if (bat_voltage >= 1.0f && bat_voltage <= 60.0f) {
             data.battery.voltage = bat_voltage;
-        } else if (bat_voltage * io_voltage_scale_ >= 1.0f &&
-                   bat_voltage * io_voltage_scale_ <= 60.0f) {
-            data.battery.voltage = bat_voltage * io_voltage_scale_;
+        } else if (descriptor_needs_raw_extraction_ &&
+                   bat_voltage * descriptor_voltage_scale_ >= 1.0f &&
+                   bat_voltage * descriptor_voltage_scale_ <= 60.0f) {
+            data.battery.voltage = bat_voltage * descriptor_voltage_scale_;
         }
     }
 
@@ -600,7 +618,6 @@ bool TrippLiteProtocol::read_data_descriptor(UpsData &data) {
 
     // --- Input data ---
     // Input voltage (Voltage in Input collection)
-    // Apply io_voltage_scale_ because Tripp Lite reports measured voltages in centi-units
     data.power.input_voltage = read_usage_in_collection(map, report_cache,
         HID_USAGE_POW(HID_USAGE_POW_VOLTAGE),
         HID_USAGE_POW(HID_USAGE_POW_INPUT),
@@ -613,8 +630,9 @@ bool TrippLiteProtocol::read_data_descriptor(UpsData &data) {
             HID_USAGE_POW(HID_USAGE_POW_POWER_SUMMARY),
             "input.voltage.powersummary");
     }
-    if (!std::isnan(data.power.input_voltage)) {
-        data.power.input_voltage *= io_voltage_scale_;
+    // Apply descriptor-specific voltage scaling for devices with bad exponents
+    if (descriptor_needs_raw_extraction_ && !std::isnan(data.power.input_voltage)) {
+        data.power.input_voltage *= descriptor_voltage_scale_;
     }
 
     // Input frequency (in Input collection)
@@ -626,8 +644,8 @@ bool TrippLiteProtocol::read_data_descriptor(UpsData &data) {
         data.power.frequency = read_usage_value(map, report_cache,
             HID_USAGE_POW(HID_USAGE_POW_FREQUENCY), "input.frequency.global");
     }
-    if (!std::isnan(data.power.frequency)) {
-        data.power.frequency *= io_frequency_scale_;
+    if (descriptor_needs_raw_extraction_ && !std::isnan(data.power.frequency)) {
+        data.power.frequency *= descriptor_frequency_scale_;
     }
 
     // --- Output data ---
@@ -636,8 +654,8 @@ bool TrippLiteProtocol::read_data_descriptor(UpsData &data) {
         HID_USAGE_POW(HID_USAGE_POW_VOLTAGE),
         HID_USAGE_POW(HID_USAGE_POW_OUTPUT),
         "output.voltage");
-    if (!std::isnan(data.power.output_voltage)) {
-        data.power.output_voltage *= io_voltage_scale_;
+    if (descriptor_needs_raw_extraction_ && !std::isnan(data.power.output_voltage)) {
+        data.power.output_voltage *= descriptor_voltage_scale_;
     }
 
     // --- Load ---
@@ -709,11 +727,11 @@ bool TrippLiteProtocol::read_data_descriptor(UpsData &data) {
     float shutdown_imminent = read_usage_value(map, report_cache,
         HID_USAGE_POW(HID_USAGE_POW_SHUTDOWN_IMMINENT), "ups.status.shutdown_imminent");
 
-    // Determine power status (input_voltage is already scaled at this point)
+    // Determine power status (input_voltage is already scaled/converted at this point)
     if (data.power.status.empty()) {
         if (!std::isnan(discharging) && discharging > 0) {
             data.power.status = status::ON_BATTERY;
-        } else if (!std::isnan(data.power.input_voltage) && data.power.input_voltage > 1.0f) {
+        } else if (!std::isnan(data.power.input_voltage) && data.power.input_voltage > 10.0f) {
             data.power.status = status::ONLINE;
         } else if (!std::isnan(present) && present > 0) {
             data.power.status = status::ONLINE;
