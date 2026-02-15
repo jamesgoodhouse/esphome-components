@@ -13,6 +13,11 @@ struct BatteryData {
   float voltage_nominal{NAN};          // Nominal battery voltage (V)
   float runtime_minutes{NAN};          // Estimated runtime (minutes)
 
+  // Battery capacity
+  float config_voltage{NAN};           // Nominal / config battery voltage (V)
+  float full_charge_capacity{NAN};     // Full charge capacity (Ah or %)
+  float design_capacity{NAN};          // Design capacity (Ah or %)
+
   // Battery thresholds
   float charge_low{NAN};               // Low battery threshold (%)
   float charge_warning{NAN};           // Warning battery threshold (%)

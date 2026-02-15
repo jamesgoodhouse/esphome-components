@@ -506,16 +506,17 @@ void NutServerComponent::handle_list_var(NutClient &client, const std::string &a
   // Standard NUT variables mapping to actual UPS data
   // Comprehensive list matching what NUT's usbhid-ups driver reports
   std::vector<std::string> variables = {
-    "battery.charge", "battery.runtime", "battery.type",
-    "battery.voltage", "battery.voltage.nominal",
+    "battery.capacity", "battery.charge", "battery.runtime", "battery.type",
+    "battery.voltage", "battery.voltage.low", "battery.voltage.nominal",
     "device.mfr", "device.model", "device.type",
     "input.frequency", "input.voltage", "input.voltage.nominal",
     "input.transfer.low", "input.transfer.high",
-    "output.frequency.nominal", "output.voltage", "output.voltage.nominal",
+    "output.current", "output.frequency", "output.frequency.nominal",
+    "output.voltage", "output.voltage.nominal",
     "ups.beeper.status", "ups.delay.shutdown",
     "ups.firmware", "ups.load",
     "ups.mfr", "ups.model",
-    "ups.power.nominal", "ups.realpower.nominal",
+    "ups.power.nominal", "ups.realpower", "ups.realpower.nominal",
     "ups.serial", "ups.status",
     "ups.timer.reboot", "ups.timer.shutdown",
   };
@@ -912,7 +913,13 @@ std::string NutServerComponent::get_ups_var(const std::string &var_name) {
     if (var_name == "battery.type" && !ups_data.battery.type.empty()) {
       return ups_data.battery.type;
     }
-    
+    if (var_name == "battery.voltage.low" && !std::isnan(ups_data.battery.config_voltage)) {
+      return format_nut_value(std::to_string(ups_data.battery.config_voltage));
+    }
+    if (var_name == "battery.capacity" && !std::isnan(ups_data.battery.design_capacity)) {
+      return format_nut_value(std::to_string(ups_data.battery.design_capacity));
+    }
+
     // Input power variables
     if (var_name == "input.voltage") {
       float input_voltage = ups_hid_->get_input_voltage();
@@ -939,6 +946,12 @@ std::string NutServerComponent::get_ups_var(const std::string &var_name) {
     if (var_name == "output.voltage.nominal" && !std::isnan(ups_data.power.output_voltage_nominal)) {
       return format_nut_value(std::to_string(ups_data.power.output_voltage_nominal));
     }
+    if (var_name == "output.current" && !std::isnan(ups_data.power.output_current)) {
+      return format_nut_value(std::to_string(ups_data.power.output_current));
+    }
+    if (var_name == "output.frequency" && !std::isnan(ups_data.power.output_frequency)) {
+      return format_nut_value(std::to_string(ups_data.power.output_frequency));
+    }
     if (var_name == "output.frequency.nominal" && !std::isnan(ups_data.power.input_voltage_nominal)) {
       // Output frequency nominal - typically matches region (60Hz US, 50Hz EU)
       // Use the input frequency as reference if available, otherwise estimate from nominal voltage
@@ -955,6 +968,9 @@ std::string NutServerComponent::get_ups_var(const std::string &var_name) {
     if (var_name == "ups.load") {
       float load_percent = ups_hid_->get_load_percent();
       if (load_percent >= 0) return std::to_string(static_cast<int>(load_percent));
+    }
+    if (var_name == "ups.realpower" && !std::isnan(ups_data.power.active_power)) {
+      return std::to_string(static_cast<int>(ups_data.power.active_power));
     }
     if (var_name == "ups.realpower.nominal" && !std::isnan(ups_data.power.realpower_nominal)) {
       return std::to_string(static_cast<int>(ups_data.power.realpower_nominal));
@@ -1135,12 +1151,27 @@ std::string NutServerComponent::get_ups_status() const {
     if (!status.empty()) status += " ";
     status += "CHRG";  // Charging
   }
-  
+
+  // AVR status flags
+  auto ups_data = ups_hid_->get_ups_data();
+  if (ups_data.power.boost_active) {
+    if (!status.empty()) status += " ";
+    status += "BOOST";
+  }
+  if (ups_data.power.buck_active) {
+    if (!status.empty()) status += " ";
+    status += "TRIM";
+  }
+  if (ups_data.power.over_temperature) {
+    if (!status.empty()) status += " ";
+    status += "OVER";
+  }
+
   if (ups_hid_->has_fault()) {
     if (!status.empty()) status += " ";
     status += "ALARM";  // Alarm condition
   }
-  
+
   return status;
 }
 

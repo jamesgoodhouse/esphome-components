@@ -596,6 +596,27 @@ bool TrippLiteProtocol::read_data_descriptor(UpsData &data) {
         data.battery.voltage_nominal = bat_voltage_nom;
     }
 
+    // Battery config voltage (0x85 page ConfigVoltage)
+    float bat_config_voltage = read_usage_value(map, report_cache,
+        HID_USAGE_BAT(HID_USAGE_BAT_CONFIG_VOLTAGE), "battery.config_voltage");
+    if (!std::isnan(bat_config_voltage) && bat_config_voltage >= 1.0f && bat_config_voltage <= 60.0f) {
+        data.battery.config_voltage = bat_config_voltage;
+    }
+
+    // Battery full charge capacity
+    float full_charge_cap = read_usage_value(map, report_cache,
+        HID_USAGE_BAT(HID_USAGE_BAT_FULL_CHARGE_CAPACITY), "battery.full_charge_capacity");
+    if (!std::isnan(full_charge_cap)) {
+        data.battery.full_charge_capacity = full_charge_cap;
+    }
+
+    // Battery design capacity
+    float design_cap = read_usage_value(map, report_cache,
+        HID_USAGE_BAT(HID_USAGE_BAT_DESIGN_CAPACITY), "battery.design_capacity");
+    if (!std::isnan(design_cap)) {
+        data.battery.design_capacity = design_cap;
+    }
+
     // Charging/Discharging/FullyCharged status flags
     float charging = read_usage_value(map, report_cache,
         HID_USAGE_BAT(HID_USAGE_BAT_CHARGING), "battery.charging");
@@ -612,6 +633,10 @@ bool TrippLiteProtocol::read_data_descriptor(UpsData &data) {
     } else if (!std::isnan(charging) && charging > 0) {
         data.battery.status = battery_status::CHARGING;
     }
+
+    // Fully discharged flag
+    float fully_discharged = read_usage_value(map, report_cache,
+        HID_USAGE_BAT(HID_USAGE_BAT_FULLY_DISCHARGED), "battery.fully_discharged");
 
     // Need replacement flag
     float need_replace = read_usage_value(map, report_cache,
@@ -660,6 +685,38 @@ bool TrippLiteProtocol::read_data_descriptor(UpsData &data) {
         "output.voltage");
     if (descriptor_needs_raw_extraction_ && !std::isnan(data.power.output_voltage)) {
         data.power.output_voltage *= descriptor_voltage_scale_;
+    }
+
+    // Output current (Current in Output collection)
+    data.power.output_current = read_usage_in_collection(map, report_cache,
+        HID_USAGE_POW(HID_USAGE_POW_CURRENT),
+        HID_USAGE_POW(HID_USAGE_POW_OUTPUT),
+        "output.current");
+    if (std::isnan(data.power.output_current)) {
+        data.power.output_current = read_usage_value(map, report_cache,
+            HID_USAGE_POW(HID_USAGE_POW_CURRENT), "output.current.global");
+    }
+    if (descriptor_needs_raw_extraction_ && !std::isnan(data.power.output_current)) {
+        data.power.output_current *= 0.1f;  // raw value is in deci-amps
+    }
+
+    // Output frequency (Frequency in Output collection)
+    data.power.output_frequency = read_usage_in_collection(map, report_cache,
+        HID_USAGE_POW(HID_USAGE_POW_FREQUENCY),
+        HID_USAGE_POW(HID_USAGE_POW_OUTPUT),
+        "output.frequency");
+    if (descriptor_needs_raw_extraction_ && !std::isnan(data.power.output_frequency)) {
+        data.power.output_frequency *= descriptor_frequency_scale_;
+    }
+
+    // Active power (live watts, in Output collection or global)
+    data.power.active_power = read_usage_in_collection(map, report_cache,
+        HID_USAGE_POW(HID_USAGE_POW_ACTIVE_POWER),
+        HID_USAGE_POW(HID_USAGE_POW_OUTPUT),
+        "output.active_power");
+    if (std::isnan(data.power.active_power)) {
+        data.power.active_power = read_usage_value(map, report_cache,
+            HID_USAGE_POW(HID_USAGE_POW_ACTIVE_POWER), "active_power.global");
     }
 
     // --- Load ---
@@ -731,6 +788,21 @@ bool TrippLiteProtocol::read_data_descriptor(UpsData &data) {
     float shutdown_imminent = read_usage_value(map, report_cache,
         HID_USAGE_POW(HID_USAGE_POW_SHUTDOWN_IMMINENT), "ups.status.shutdown_imminent");
 
+    // AVR status flags
+    float boost_val = read_usage_value(map, report_cache,
+        HID_USAGE_POW(HID_USAGE_POW_BOOST), "ups.status.boost");
+    float buck_val = read_usage_value(map, report_cache,
+        HID_USAGE_POW(HID_USAGE_POW_BUCK), "ups.status.buck");
+    float overtemp_val = read_usage_value(map, report_cache,
+        HID_USAGE_POW(HID_USAGE_POW_OVER_TEMPERATURE), "ups.status.overtemp");
+    float commlost_val = read_usage_value(map, report_cache,
+        HID_USAGE_POW(HID_USAGE_POW_COMMUNICATION_LOST), "ups.status.commlost");
+
+    data.power.boost_active = (!std::isnan(boost_val) && boost_val > 0);
+    data.power.buck_active = (!std::isnan(buck_val) && buck_val > 0);
+    data.power.over_temperature = (!std::isnan(overtemp_val) && overtemp_val > 0);
+    data.power.communication_lost = (!std::isnan(commlost_val) && commlost_val > 0);
+
     // Determine power status (input_voltage is already scaled/converted at this point)
     if (data.power.status.empty()) {
         if (!std::isnan(discharging) && discharging > 0) {
@@ -748,9 +820,21 @@ bool TrippLiteProtocol::read_data_descriptor(UpsData &data) {
         data.power.status = "Overload";
     }
 
+    // Append boost/buck to status for AVR UPS
+    if (data.power.boost_active && data.power.status == status::ONLINE) {
+        data.power.status = "Online (Boost)";
+    } else if (data.power.buck_active && data.power.status == status::ONLINE) {
+        data.power.status = "Online (Trim)";
+    }
+
+    // If fully discharged, note it in battery status
+    if (!std::isnan(fully_discharged) && fully_discharged > 0) {
+        data.battery.status = "Depleted";
+    }
+
     // If we found input voltage but not output, assume output = input when online
     if (!std::isnan(data.power.input_voltage) && std::isnan(data.power.output_voltage) &&
-        data.power.status == status::ONLINE) {
+        (data.power.status == status::ONLINE || data.power.status == "Online (Boost)" || data.power.status == "Online (Trim)")) {
         data.power.output_voltage = data.power.input_voltage;
     }
 
@@ -838,12 +922,14 @@ bool TrippLiteProtocol::read_data_descriptor(UpsData &data) {
                    !std::isnan(data.power.load_percent);
 
     if (success) {
-        ESP_LOGI(TL_TAG, "Data read OK (descriptor): bat=%s%%, in=%sV, out=%sV, load=%s%%, freq=%sHz",
+        ESP_LOGI(TL_TAG, "Data read OK (descriptor): bat=%s%%, in=%sV, out=%sV, load=%s%%, freq=%sHz, cur=%sA, pwr=%sW",
                  !std::isnan(data.battery.level) ? std::to_string(static_cast<int>(data.battery.level)).c_str() : "?",
                  !std::isnan(data.power.input_voltage) ? std::to_string(static_cast<int>(data.power.input_voltage)).c_str() : "?",
                  !std::isnan(data.power.output_voltage) ? std::to_string(static_cast<int>(data.power.output_voltage)).c_str() : "?",
                  !std::isnan(data.power.load_percent) ? std::to_string(static_cast<int>(data.power.load_percent)).c_str() : "?",
-                 !std::isnan(data.power.frequency) ? std::to_string(static_cast<int>(data.power.frequency)).c_str() : "?");
+                 !std::isnan(data.power.frequency) ? std::to_string(static_cast<int>(data.power.frequency)).c_str() : "?",
+                 !std::isnan(data.power.output_current) ? std::to_string(data.power.output_current).c_str() : "?",
+                 !std::isnan(data.power.active_power) ? std::to_string(static_cast<int>(data.power.active_power)).c_str() : "?");
 
         // Log unused descriptor fields on the 3rd read cycle.
         // Delayed so the serial buffer isn't competing with init/sensor logs.

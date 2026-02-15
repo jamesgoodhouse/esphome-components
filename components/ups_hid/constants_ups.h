@@ -182,9 +182,15 @@ namespace sensor_type {
     static constexpr const char* INPUT_VOLTAGE_NOMINAL = "input_voltage_nominal";
     static constexpr const char* OUTPUT_VOLTAGE = "output_voltage";
     static constexpr const char* LOAD_PERCENT = "load_percent";
+    static constexpr const char* OUTPUT_CURRENT = "output_current";
+    static constexpr const char* OUTPUT_FREQUENCY = "output_frequency";
+    static constexpr const char* ACTIVE_POWER = "active_power";
     static constexpr const char* FREQUENCY = "frequency";
     static constexpr const char* INPUT_TRANSFER_LOW = "input_transfer_low";
     static constexpr const char* INPUT_TRANSFER_HIGH = "input_transfer_high";
+    static constexpr const char* BATTERY_CONFIG_VOLTAGE = "battery_config_voltage";
+    static constexpr const char* BATTERY_FULL_CHARGE_CAPACITY = "battery_full_charge_capacity";
+    static constexpr const char* BATTERY_DESIGN_CAPACITY = "battery_design_capacity";
     static constexpr const char* BATTERY_RUNTIME_LOW = "battery_runtime_low";
     static constexpr const char* UPS_REALPOWER_NOMINAL = "ups_realpower_nominal";
     static constexpr const char* UPS_DELAY_SHUTDOWN = "ups_delay_shutdown";
@@ -205,7 +211,10 @@ namespace binary_sensor_type {
     static constexpr const char* BOOST = "boost";
     static constexpr const char* CHARGING = "charging";
     static constexpr const char* DISCHARGING = "discharging";
+    static constexpr const char* FULLY_DISCHARGED = "fully_discharged";
     static constexpr const char* BYPASS_ACTIVE = "bypass_active";
+    static constexpr const char* OVER_TEMPERATURE = "over_temperature";
+    static constexpr const char* COMMUNICATION_LOST = "communication_lost";
 }
 
 // ==================== Text Sensor Type Identifiers ====================

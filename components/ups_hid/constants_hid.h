@@ -75,15 +75,19 @@
 #define HID_USAGE_POW_TEST                      0x0058
 #define HID_USAGE_POW_AUDIBLE_ALARM_CONTROL     0x005A
 
-// Status Indicators  
+// Status Indicators
 #define HID_USAGE_POW_PRESENT                   0x0060
 #define HID_USAGE_POW_GOOD                      0x0061
 #define HID_USAGE_POW_INTERNAL_FAILURE          0x0062
 #define HID_USAGE_POW_VOLTAGE_OUT_OF_RANGE      0x0063
 #define HID_USAGE_POW_OVERLOAD                  0x0065
 #define HID_USAGE_POW_OVER_CHARGED              0x0066
+#define HID_USAGE_POW_OVER_TEMPERATURE          0x0067
 #define HID_USAGE_POW_SHUTDOWN_REQUESTED        0x0068
 #define HID_USAGE_POW_SHUTDOWN_IMMINENT         0x0069
+#define HID_USAGE_POW_BOOST                     0x006D
+#define HID_USAGE_POW_BUCK                      0x006E
+#define HID_USAGE_POW_COMMUNICATION_LOST        0x0073
 
 // Device Information
 #define HID_USAGE_POW_I_MANUFACTURER            0x00FD
@@ -98,6 +102,7 @@
 #define HID_USAGE_BAT_CHARGING                  0x0044
 #define HID_USAGE_BAT_DISCHARGING               0x0045
 #define HID_USAGE_BAT_FULLY_CHARGED             0x0046
+#define HID_USAGE_BAT_FULLY_DISCHARGED          0x0047
 #define HID_USAGE_BAT_NEED_REPLACEMENT          0x004B
 
 // Battery Measurements
@@ -109,6 +114,8 @@
 
 // Battery Configuration
 #define HID_USAGE_BAT_DESIGN_CAPACITY           0x0083
+#define HID_USAGE_BAT_MANUFACTURE_DATE          0x0085
+#define HID_USAGE_BAT_CONFIG_VOLTAGE            0x008B
 #define HID_USAGE_BAT_WARNING_CAPACITY_LIMIT    0x008C
 
 // Battery Information

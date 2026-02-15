@@ -4,11 +4,13 @@ from esphome.components import sensor
 from esphome.const import (
     CONF_TYPE,
     DEVICE_CLASS_BATTERY,
+    DEVICE_CLASS_CURRENT,
     DEVICE_CLASS_VOLTAGE,
     DEVICE_CLASS_POWER_FACTOR,
     DEVICE_CLASS_DURATION,
     DEVICE_CLASS_POWER,
     DEVICE_CLASS_EMPTY,
+    UNIT_AMPERE,
     UNIT_PERCENT,
     UNIT_VOLT,
     UNIT_MINUTE,
@@ -77,6 +79,33 @@ SENSOR_TYPES = {
     "input_transfer_high": {
         "unit": UNIT_VOLT,
         "device_class": DEVICE_CLASS_VOLTAGE,
+        "accuracy_decimals": 0,
+    },
+    "output_current": {
+        "unit": UNIT_AMPERE,
+        "device_class": DEVICE_CLASS_CURRENT,
+        "accuracy_decimals": 1,
+    },
+    "output_frequency": {
+        "unit": UNIT_HERTZ,
+        "accuracy_decimals": 1,
+    },
+    "active_power": {
+        "unit": UNIT_WATT,
+        "device_class": DEVICE_CLASS_POWER,
+        "accuracy_decimals": 0,
+    },
+    "battery_config_voltage": {
+        "unit": UNIT_VOLT,
+        "device_class": DEVICE_CLASS_VOLTAGE,
+        "accuracy_decimals": 1,
+    },
+    "battery_full_charge_capacity": {
+        "unit": UNIT_PERCENT,
+        "accuracy_decimals": 0,
+    },
+    "battery_design_capacity": {
+        "unit": UNIT_PERCENT,
         "accuracy_decimals": 0,
     },
     "ups_realpower_nominal": {

@@ -21,6 +21,9 @@ struct PowerData {
   // Output power metrics
   float output_voltage{NAN};           // Current output voltage (V)
   float output_voltage_nominal{NAN};   // Nominal output voltage (V)
+  float output_current{NAN};           // Current output current (A)
+  float output_frequency{NAN};         // Current output frequency (Hz)
+  float active_power{NAN};             // Live active power draw (W)
   float load_percent{NAN};             // Current load percentage (0-100%)
 
   // Power ratings and capabilities
@@ -29,6 +32,12 @@ struct PowerData {
 
   // Power status information
   std::string status{};                // Power status text (Online, On Battery, etc.)
+
+  // AVR / power conditioning flags
+  bool boost_active{false};            // AVR boost mode active
+  bool buck_active{false};             // AVR buck mode active
+  bool over_temperature{false};        // Over temperature alarm
+  bool communication_lost{false};      // Communication lost flag
 
   // Power quality indicators
   bool input_voltage_valid() const {

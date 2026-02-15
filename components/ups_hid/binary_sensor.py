@@ -36,6 +36,24 @@ BINARY_SENSOR_TYPES = {
     "charging": {
         "device_class": DEVICE_CLASS_BATTERY,
     },
+    "discharging": {
+        "device_class": DEVICE_CLASS_BATTERY,
+    },
+    "fully_discharged": {
+        "device_class": DEVICE_CLASS_BATTERY,
+    },
+    "boost": {
+        "device_class": DEVICE_CLASS_POWER,
+    },
+    "buck": {
+        "device_class": DEVICE_CLASS_POWER,
+    },
+    "over_temperature": {
+        "device_class": DEVICE_CLASS_PROBLEM,
+    },
+    "communication_lost": {
+        "device_class": DEVICE_CLASS_PROBLEM,
+    },
 }
 
 

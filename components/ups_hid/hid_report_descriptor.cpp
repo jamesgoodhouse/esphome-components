@@ -683,14 +683,14 @@ const char* HidReportMap::usage_name(uint32_t usage) {
     case HID_USAGE_POW(0x0064): return "FrequencyOutOfRange";
     case HID_USAGE_POW(HID_USAGE_POW_OVERLOAD): return "Overload";
     case HID_USAGE_POW(HID_USAGE_POW_OVER_CHARGED): return "OverCharged";
-    case HID_USAGE_POW(0x0067): return "OverTemperature";
+    case HID_USAGE_POW(HID_USAGE_POW_OVER_TEMPERATURE): return "OverTemperature";
     case HID_USAGE_POW(HID_USAGE_POW_SHUTDOWN_REQUESTED): return "ShutdownRequested";
     case HID_USAGE_POW(HID_USAGE_POW_SHUTDOWN_IMMINENT): return "ShutdownImminent";
     case HID_USAGE_POW(0x006B): return "SwitchOn/Off";
     case HID_USAGE_POW(0x006C): return "Switchable";
-    case HID_USAGE_POW(0x006D): return "Boost";
-    case HID_USAGE_POW(0x006E): return "Buck";
-    case HID_USAGE_POW(0x0073): return "CommunicationLost";
+    case HID_USAGE_POW(HID_USAGE_POW_BOOST): return "Boost";
+    case HID_USAGE_POW(HID_USAGE_POW_BUCK): return "Buck";
+    case HID_USAGE_POW(HID_USAGE_POW_COMMUNICATION_LOST): return "CommunicationLost";
     // String descriptors
     case HID_USAGE_POW(HID_USAGE_POW_I_MANUFACTURER): return "iManufacturer";
     case HID_USAGE_POW(HID_USAGE_POW_I_PRODUCT): return "iProduct";
@@ -705,15 +705,16 @@ const char* HidReportMap::usage_name(uint32_t usage) {
     case HID_USAGE_BAT(HID_USAGE_BAT_CHARGING): return "Charging";
     case HID_USAGE_BAT(HID_USAGE_BAT_DISCHARGING): return "Discharging";
     case HID_USAGE_BAT(HID_USAGE_BAT_FULLY_CHARGED): return "FullyCharged";
-    case HID_USAGE_BAT(0x0047): return "FullyDischarged";
-    case HID_USAGE_BAT(0x004B): return "NeedReplacement";
+    case HID_USAGE_BAT(HID_USAGE_BAT_FULLY_DISCHARGED): return "FullyDischarged";
+    case HID_USAGE_BAT(HID_USAGE_BAT_NEED_REPLACEMENT): return "NeedReplacement";
     case HID_USAGE_BAT(HID_USAGE_BAT_REMAINING_CAPACITY): return "RemainingCapacity";
     case HID_USAGE_BAT(HID_USAGE_BAT_FULL_CHARGE_CAPACITY): return "FullChargeCapacity";
     case HID_USAGE_BAT(HID_USAGE_BAT_RUN_TIME_TO_EMPTY): return "RunTimeToEmpty";
     case HID_USAGE_BAT(HID_USAGE_BAT_AVERAGE_TIME_TO_EMPTY): return "AverageTimeToEmpty";
     case HID_USAGE_BAT(HID_USAGE_BAT_AVERAGE_TIME_TO_FULL): return "AverageTimeToFull";
     case HID_USAGE_BAT(HID_USAGE_BAT_DESIGN_CAPACITY): return "DesignCapacity";
-    case HID_USAGE_BAT(0x0085): return "ManufactureDate";
+    case HID_USAGE_BAT(HID_USAGE_BAT_MANUFACTURE_DATE): return "ManufactureDate";
+    case HID_USAGE_BAT(HID_USAGE_BAT_CONFIG_VOLTAGE): return "ConfigVoltage";
     case HID_USAGE_BAT(HID_USAGE_BAT_I_MANUFACTURER_NAME): return "iManufacturerName";
     case HID_USAGE_BAT(HID_USAGE_BAT_I_DEVICE_NAME): return "iDeviceName";
     case HID_USAGE_BAT(HID_USAGE_BAT_I_DEVICE_CHEMISTRY): return "iDeviceChemistry";

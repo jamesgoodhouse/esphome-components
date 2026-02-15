@@ -369,6 +369,18 @@ void UpsHidComponent::update_sensors() {
       value = ups_data_.power.input_transfer_high;
     } else if (type == sensor_type::BATTERY_RUNTIME_LOW && !std::isnan(ups_data_.battery.runtime_low)) {
       value = ups_data_.battery.runtime_low;
+    } else if (type == sensor_type::OUTPUT_CURRENT && !std::isnan(ups_data_.power.output_current)) {
+      value = ups_data_.power.output_current;
+    } else if (type == sensor_type::OUTPUT_FREQUENCY && !std::isnan(ups_data_.power.output_frequency)) {
+      value = ups_data_.power.output_frequency;
+    } else if (type == sensor_type::ACTIVE_POWER && !std::isnan(ups_data_.power.active_power)) {
+      value = ups_data_.power.active_power;
+    } else if (type == sensor_type::BATTERY_CONFIG_VOLTAGE && !std::isnan(ups_data_.battery.config_voltage)) {
+      value = ups_data_.battery.config_voltage;
+    } else if (type == sensor_type::BATTERY_FULL_CHARGE_CAPACITY && !std::isnan(ups_data_.battery.full_charge_capacity)) {
+      value = ups_data_.battery.full_charge_capacity;
+    } else if (type == sensor_type::BATTERY_DESIGN_CAPACITY && !std::isnan(ups_data_.battery.design_capacity)) {
+      value = ups_data_.battery.design_capacity;
     } else if (type == sensor_type::UPS_REALPOWER_NOMINAL && !std::isnan(ups_data_.power.realpower_nominal)) {
       value = ups_data_.power.realpower_nominal;
     } else if (type == sensor_type::UPS_DELAY_SHUTDOWN && !std::isnan(ups_data_.config.delay_shutdown)) {
@@ -399,12 +411,30 @@ void UpsHidComponent::update_sensors() {
 
     bool state = false;
 
-    if (type == binary_sensor_type::ONLINE && ups_data_.power.input_voltage_valid()) {
-      state = true;
-    } else if (type == binary_sensor_type::ON_BATTERY && ups_data_.power.input_voltage_valid()) {
-      state = false; // Opposite of online
+    if (type == binary_sensor_type::ONLINE) {
+      state = ups_data_.power.status == status::ONLINE ||
+              ups_data_.power.status == "Online (Boost)" ||
+              ups_data_.power.status == "Online (Trim)";
+    } else if (type == binary_sensor_type::ON_BATTERY) {
+      state = ups_data_.power.status == status::ON_BATTERY;
     } else if (type == binary_sensor_type::LOW_BATTERY) {
       state = ups_data_.battery.is_low();
+    } else if (type == binary_sensor_type::OVERLOAD) {
+      state = ups_data_.power.is_overloaded() || ups_data_.power.status == "Overload";
+    } else if (type == binary_sensor_type::BOOST) {
+      state = ups_data_.power.boost_active;
+    } else if (type == binary_sensor_type::BUCK) {
+      state = ups_data_.power.buck_active;
+    } else if (type == binary_sensor_type::CHARGING) {
+      state = ups_data_.battery.status == battery_status::CHARGING;
+    } else if (type == binary_sensor_type::DISCHARGING) {
+      state = ups_data_.battery.status == battery_status::DISCHARGING;
+    } else if (type == binary_sensor_type::FULLY_DISCHARGED) {
+      state = ups_data_.battery.status == "Depleted";
+    } else if (type == binary_sensor_type::OVER_TEMPERATURE) {
+      state = ups_data_.power.over_temperature;
+    } else if (type == binary_sensor_type::COMMUNICATION_LOST) {
+      state = ups_data_.power.communication_lost;
     }
 
     sensor->publish_state(state);
