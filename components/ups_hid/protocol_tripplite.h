@@ -114,6 +114,11 @@ private:
     // === Descriptor-based data reading (preferred) ===
     bool read_data_descriptor(UpsData &data);
 
+    // Tracks which usages were queried during descriptor-based reading,
+    // so we can report which descriptor fields are unused.
+    std::set<uint32_t> queried_usages_;
+    bool field_summary_logged_{false};  // Only log once after first read
+
     // Helper: extract a single usage value from cached report data
     float read_usage_value(const HidReportMap* map,
                           const std::map<uint8_t, std::vector<uint8_t>>& cache,

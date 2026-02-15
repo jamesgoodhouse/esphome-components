@@ -83,6 +83,16 @@ class HidReportMap {
   /** Log the parsed descriptor for debugging */
   void dump(const char* tag) const;
 
+  /** Get a human-readable name for a full 32-bit usage (page:id) */
+  static const char* usage_name(uint32_t usage);
+
+  /**
+   * Log a compact summary of all descriptor fields, marking which ones
+   * were queried (via the queried_usages set) and which are unused.
+   * Call after data reading to see what's available but not extracted.
+   */
+  void log_field_summary(const char* tag, const std::set<uint32_t>& queried_usages) const;
+
  private:
   std::vector<HidField> fields_;
 };

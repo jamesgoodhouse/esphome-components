@@ -110,6 +110,8 @@ bool TrippLiteProtocol::initialize() {
     descriptor_needs_raw_extraction_ = false;
     descriptor_voltage_scale_ = 1.0;
     descriptor_frequency_scale_ = 1.0;
+    queried_usages_.clear();
+    field_summary_logged_ = false;
 
     // Always determine scaling factors (needed for both modes)
     determine_scaling_factors();
@@ -441,6 +443,7 @@ float TrippLiteProtocol::read_usage_value(
     const std::map<uint8_t, std::vector<uint8_t>>& cache,
     uint32_t usage, const char* name) {
 
+    queried_usages_.insert(usage);
     const HidField* field = map->find_field_by_usage(usage);
     if (!field) {
         ESP_LOGV(TL_TAG, "No descriptor field for %s (usage 0x%08lX)", name, (unsigned long)usage);
@@ -475,6 +478,7 @@ float TrippLiteProtocol::read_usage_in_collection(
     uint32_t usage, uint32_t collection_usage,
     const char* name) {
 
+    queried_usages_.insert(usage);
     // Search for a field with the given usage that is nested under
     // a collection with the given collection_usage in its path
     const HidField* field = nullptr;
@@ -840,6 +844,12 @@ bool TrippLiteProtocol::read_data_descriptor(UpsData &data) {
                  !std::isnan(data.power.output_voltage) ? std::to_string(static_cast<int>(data.power.output_voltage)).c_str() : "?",
                  !std::isnan(data.power.load_percent) ? std::to_string(static_cast<int>(data.power.load_percent)).c_str() : "?",
                  !std::isnan(data.power.frequency) ? std::to_string(static_cast<int>(data.power.frequency)).c_str() : "?");
+
+        // Log unused descriptor fields once (after first successful read)
+        if (!field_summary_logged_) {
+            field_summary_logged_ = true;
+            map->log_field_summary(TL_TAG, queried_usages_);
+        }
     } else {
         ESP_LOGW(TL_TAG, "Descriptor-based reading produced no usable data, falling back to heuristic");
         use_descriptor_ = false;

@@ -622,5 +622,173 @@ void HidReportMap::dump(const char* tag) const {
   ESP_LOGI(t, "=== End HID Report Map ===");
 }
 
+// =============================================================================
+// Usage name lookup
+// =============================================================================
+
+const char* HidReportMap::usage_name(uint32_t usage) {
+  // Power Device Page (0x84)
+  switch (usage) {
+    // Device/collection identifiers
+    case HID_USAGE_POW(0x0001): return "iName";
+    case HID_USAGE_POW(0x0002): return "PresentStatus";
+    case HID_USAGE_POW(0x0004): return "UPS";
+    case HID_USAGE_POW(0x0005): return "PowerSupply";
+    case HID_USAGE_POW(0x0010): return "BatterySystem";
+    case HID_USAGE_POW(0x0012): return "Battery";
+    case HID_USAGE_POW(0x0014): return "Charger";
+    case HID_USAGE_POW(0x0016): return "PowerConverter";
+    case HID_USAGE_POW(0x0018): return "OutletSystem";
+    case HID_USAGE_POW(HID_USAGE_POW_INPUT): return "Input";
+    case HID_USAGE_POW(HID_USAGE_POW_OUTPUT): return "Output";
+    case HID_USAGE_POW(0x001E): return "Flow";
+    case HID_USAGE_POW(HID_USAGE_POW_POWER_SUMMARY): return "PowerSummary";
+    // Measurements
+    case HID_USAGE_POW(HID_USAGE_POW_VOLTAGE): return "Voltage";
+    case HID_USAGE_POW(HID_USAGE_POW_CURRENT): return "Current";
+    case HID_USAGE_POW(HID_USAGE_POW_FREQUENCY): return "Frequency";
+    case HID_USAGE_POW(HID_USAGE_POW_APPARENT_POWER): return "ApparentPower";
+    case HID_USAGE_POW(HID_USAGE_POW_ACTIVE_POWER): return "ActivePower";
+    case HID_USAGE_POW(HID_USAGE_POW_PERCENT_LOAD): return "PercentLoad";
+    case HID_USAGE_POW(HID_USAGE_POW_TEMPERATURE): return "Temperature";
+    case HID_USAGE_POW(0x0037): return "Humidity";
+    // Config
+    case HID_USAGE_POW(HID_USAGE_POW_CONFIG_VOLTAGE): return "ConfigVoltage";
+    case HID_USAGE_POW(HID_USAGE_POW_CONFIG_CURRENT): return "ConfigCurrent";
+    case HID_USAGE_POW(HID_USAGE_POW_CONFIG_FREQUENCY): return "ConfigFrequency";
+    case HID_USAGE_POW(HID_USAGE_POW_CONFIG_APPARENT_POWER): return "ConfigApparentPower";
+    case HID_USAGE_POW(HID_USAGE_POW_CONFIG_ACTIVE_POWER): return "ConfigActivePower";
+    case HID_USAGE_POW(HID_USAGE_POW_CONFIG_PERCENT_LOAD): return "ConfigPercentLoad";
+    case HID_USAGE_POW(0x0046): return "ConfigTemperature";
+    case HID_USAGE_POW(0x0047): return "ConfigHumidity";
+    // Controls
+    case HID_USAGE_POW(HID_USAGE_POW_SWITCH_ON_CONTROL): return "SwitchOnControl";
+    case HID_USAGE_POW(HID_USAGE_POW_SWITCH_OFF_CONTROL): return "SwitchOffControl";
+    case HID_USAGE_POW(0x0052): return "ToggleControl";
+    case HID_USAGE_POW(HID_USAGE_POW_LOW_VOLTAGE_TRANSFER): return "LowVoltageTransfer";
+    case HID_USAGE_POW(HID_USAGE_POW_HIGH_VOLTAGE_TRANSFER): return "HighVoltageTransfer";
+    case HID_USAGE_POW(HID_USAGE_POW_DELAY_BEFORE_REBOOT): return "DelayBeforeReboot";
+    case HID_USAGE_POW(HID_USAGE_POW_DELAY_BEFORE_STARTUP): return "DelayBeforeStartup";
+    case HID_USAGE_POW(HID_USAGE_POW_DELAY_BEFORE_SHUTDOWN): return "DelayBeforeShutdown";
+    case HID_USAGE_POW(HID_USAGE_POW_TEST): return "Test";
+    case HID_USAGE_POW(0x0059): return "ModuleReset";
+    case HID_USAGE_POW(HID_USAGE_POW_AUDIBLE_ALARM_CONTROL): return "AudibleAlarmControl";
+    case HID_USAGE_POW(0x005C): return "ForceShutdown";
+    case HID_USAGE_POW(0x005D): return "GracefulShutdown";
+    // Status
+    case HID_USAGE_POW(HID_USAGE_POW_PRESENT): return "ACPresent";
+    case HID_USAGE_POW(HID_USAGE_POW_GOOD): return "Good";
+    case HID_USAGE_POW(HID_USAGE_POW_INTERNAL_FAILURE): return "InternalFailure";
+    case HID_USAGE_POW(HID_USAGE_POW_VOLTAGE_OUT_OF_RANGE): return "VoltageOutOfRange";
+    case HID_USAGE_POW(0x0064): return "FrequencyOutOfRange";
+    case HID_USAGE_POW(HID_USAGE_POW_OVERLOAD): return "Overload";
+    case HID_USAGE_POW(HID_USAGE_POW_OVER_CHARGED): return "OverCharged";
+    case HID_USAGE_POW(0x0067): return "OverTemperature";
+    case HID_USAGE_POW(HID_USAGE_POW_SHUTDOWN_REQUESTED): return "ShutdownRequested";
+    case HID_USAGE_POW(HID_USAGE_POW_SHUTDOWN_IMMINENT): return "ShutdownImminent";
+    case HID_USAGE_POW(0x006B): return "SwitchOn/Off";
+    case HID_USAGE_POW(0x006C): return "Switchable";
+    case HID_USAGE_POW(0x006D): return "Boost";
+    case HID_USAGE_POW(0x006E): return "Buck";
+    case HID_USAGE_POW(0x0073): return "CommunicationLost";
+    // String descriptors
+    case HID_USAGE_POW(HID_USAGE_POW_I_MANUFACTURER): return "iManufacturer";
+    case HID_USAGE_POW(HID_USAGE_POW_I_PRODUCT): return "iProduct";
+    case HID_USAGE_POW(HID_USAGE_POW_I_SERIAL_NUMBER): return "iSerialNumber";
+    default: break;
+  }
+
+  // Battery System Page (0x85)
+  switch (usage) {
+    case HID_USAGE_BAT(0x0029): return "RemainingCapacityLimit";
+    case HID_USAGE_BAT(0x002C): return "CapacityMode";
+    case HID_USAGE_BAT(HID_USAGE_BAT_CHARGING): return "Charging";
+    case HID_USAGE_BAT(HID_USAGE_BAT_DISCHARGING): return "Discharging";
+    case HID_USAGE_BAT(HID_USAGE_BAT_FULLY_CHARGED): return "FullyCharged";
+    case HID_USAGE_BAT(0x0047): return "FullyDischarged";
+    case HID_USAGE_BAT(0x004B): return "NeedReplacement";
+    case HID_USAGE_BAT(HID_USAGE_BAT_REMAINING_CAPACITY): return "RemainingCapacity";
+    case HID_USAGE_BAT(HID_USAGE_BAT_FULL_CHARGE_CAPACITY): return "FullChargeCapacity";
+    case HID_USAGE_BAT(HID_USAGE_BAT_RUN_TIME_TO_EMPTY): return "RunTimeToEmpty";
+    case HID_USAGE_BAT(HID_USAGE_BAT_AVERAGE_TIME_TO_EMPTY): return "AverageTimeToEmpty";
+    case HID_USAGE_BAT(HID_USAGE_BAT_AVERAGE_TIME_TO_FULL): return "AverageTimeToFull";
+    case HID_USAGE_BAT(HID_USAGE_BAT_DESIGN_CAPACITY): return "DesignCapacity";
+    case HID_USAGE_BAT(0x0085): return "ManufactureDate";
+    case HID_USAGE_BAT(HID_USAGE_BAT_I_MANUFACTURER_NAME): return "iManufacturerName";
+    case HID_USAGE_BAT(HID_USAGE_BAT_I_DEVICE_NAME): return "iDeviceName";
+    case HID_USAGE_BAT(HID_USAGE_BAT_I_DEVICE_CHEMISTRY): return "iDeviceChemistry";
+    case HID_USAGE_BAT(HID_USAGE_BAT_WARNING_CAPACITY_LIMIT): return "WarningCapacityLimit";
+    case HID_USAGE_BAT(0x008D): return "CapacityGranularity1";
+    case HID_USAGE_BAT(0x008E): return "CapacityGranularity2";
+    case HID_USAGE_BAT(0x008F): return "iOEMInformation";
+    default: break;
+  }
+
+  return nullptr;
+}
+
+// =============================================================================
+// Compact field summary (for post-read logging)
+// =============================================================================
+
+void HidReportMap::log_field_summary(
+    const char* tag, const std::set<uint32_t>& queried_usages) const {
+  const char* t = tag ? tag : TAG;
+
+  // Build a list of unused fields with their context
+  int used_count = 0;
+  int unused_count = 0;
+  for (const auto& f : fields_) {
+    if (queried_usages.count(f.usage)) {
+      used_count++;
+    } else {
+      unused_count++;
+    }
+  }
+
+  ESP_LOGI(t, "Descriptor fields: %d used, %d unused out of %zu total",
+           used_count, unused_count, fields_.size());
+
+  if (unused_count == 0) return;
+
+  ESP_LOGI(t, "--- Unused descriptor fields ---");
+  for (const auto& f : fields_) {
+    if (queried_usages.count(f.usage)) continue;
+
+    uint16_t page = (f.usage >> 16) & 0xFFFF;
+    uint16_t uid = f.usage & 0xFFFF;
+    const char* name = usage_name(f.usage);
+
+    // Build collection path string
+    std::string path_str;
+    for (auto pu : f.usage_path) {
+      const char* pn = usage_name(pu);
+      if (!path_str.empty()) path_str += ".";
+      if (pn) {
+        path_str += pn;
+      } else {
+        char buf[16];
+        snprintf(buf, sizeof(buf), "0x%04X", (unsigned)(pu & 0xFFFF));
+        path_str += buf;
+      }
+    }
+
+    if (name) {
+      ESP_LOGI(t, "  RID=0x%02X %s.%s  bits=%u@%u  log=[%ld..%ld]  exp=%d",
+               f.report_id, path_str.c_str(), name,
+               f.bit_size, f.bit_offset,
+               (long)f.logical_min, (long)f.logical_max,
+               f.unit_exponent);
+    } else {
+      ESP_LOGI(t, "  RID=0x%02X %s.Page%02X:0x%04X  bits=%u@%u  log=[%ld..%ld]  exp=%d",
+               f.report_id, path_str.c_str(), page, uid,
+               f.bit_size, f.bit_offset,
+               (long)f.logical_min, (long)f.logical_max,
+               f.unit_exponent);
+    }
+  }
+  ESP_LOGI(t, "--- End unused fields ---");
+}
+
 }  // namespace ups_hid
 }  // namespace esphome
