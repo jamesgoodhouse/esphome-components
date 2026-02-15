@@ -838,7 +838,7 @@ void HidReportMap::log_unused_field_values(
 
   for (const auto& f : fields_) {
     if (queried_usages.count(f.usage)) continue;
-    if (f.usage == 0) continue;  // Skip padding bits
+    if ((f.usage & 0xFFFF) == 0) continue;  // Skip padding bits (usage ID 0 on any page)
     if (is_string_usage(f.usage)) continue;  // Skip string indices
 
     // Look up report data in cache

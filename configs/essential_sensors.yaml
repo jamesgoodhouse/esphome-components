@@ -104,3 +104,38 @@ binary_sensor:
     id: overload_warning
     type: overload
     device_class: power
+
+  - platform: ups_hid
+    ups_hid_id: ups_monitor
+    name: "Battery Discharging"
+    id: battery_discharging
+    type: discharging
+    device_class: battery
+
+  - platform: ups_hid
+    ups_hid_id: ups_monitor
+    name: "AVR Boost Active"
+    id: avr_boost_active
+    type: boost
+    device_class: power
+
+  - platform: ups_hid
+    ups_hid_id: ups_monitor
+    name: "AVR Buck Active"
+    id: avr_buck_active
+    type: buck
+    device_class: power
+
+  - platform: ups_hid
+    ups_hid_id: ups_monitor
+    name: "Over Temperature"
+    id: over_temperature
+    type: over_temperature
+    device_class: problem
+
+  - platform: ups_hid
+    ups_hid_id: ups_monitor
+    name: "Communication Lost"
+    id: communication_lost
+    type: communication_lost
+    device_class: problem

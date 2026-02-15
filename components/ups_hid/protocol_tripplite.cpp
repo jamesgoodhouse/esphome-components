@@ -568,8 +568,9 @@ bool TrippLiteProtocol::read_data_descriptor(UpsData &data) {
     }
 
     // Battery voltage - look in BatterySystem.Battery collection first
-    // Battery voltage uses a different range (12V/24V) than AC voltage, so
-    // try value as-is first, then try with descriptor voltage scaling
+    // Battery voltage uses a different range (12V/24V) than AC voltage.
+    // First try in Battery collection, then scan all Voltage fields for one
+    // in battery range that isn't already claimed as input/output.
     float bat_voltage = read_usage_in_collection(map, report_cache,
         HID_USAGE_POW(HID_USAGE_POW_VOLTAGE),
         HID_USAGE_BAT(0x0012),  // Battery collection
@@ -583,6 +584,25 @@ bool TrippLiteProtocol::read_data_descriptor(UpsData &data) {
             data.battery.voltage = bat_voltage * descriptor_voltage_scale_;
         }
     }
+    // Fallback: scan all Voltage fields for one in DC battery range
+    if (std::isnan(data.battery.voltage)) {
+        for (const auto& f : map->get_all_fields()) {
+            if (f.usage != HID_USAGE_POW(HID_USAGE_POW_VOLTAGE)) continue;
+            auto it = report_cache.find(f.report_id);
+            if (it == report_cache.end()) continue;
+            float v = descriptor_needs_raw_extraction_
+                ? map->extract_raw_value(f, it->second.data(), it->second.size())
+                : map->extract_field_value(f, it->second.data(), it->second.size());
+            if (std::isnan(v)) continue;
+            float scaled = descriptor_needs_raw_extraction_ ? v * descriptor_voltage_scale_ : v;
+            if (scaled >= 1.0f && scaled <= 60.0f) {
+                data.battery.voltage = scaled;
+                ESP_LOGD(TL_TAG, "battery.voltage fallback = %.1f (report 0x%02X, raw=%g)",
+                         scaled, f.report_id, v);
+                break;
+            }
+        }
+    }
 
     // Battery voltage nominal (ConfigVoltage in Battery collection)
     // Config values are already in correct units, no scaling needed
@@ -594,11 +614,15 @@ bool TrippLiteProtocol::read_data_descriptor(UpsData &data) {
         data.battery.voltage_nominal = bat_voltage_nom;
     }
 
-    // Battery config voltage (0x85 page ConfigVoltage)
+    // Battery config voltage (BatterySystem page ConfigVoltage, 0x85:0x008B)
     float bat_config_voltage = read_usage_value(map, report_cache,
         HID_USAGE_BAT(HID_USAGE_BAT_CONFIG_VOLTAGE), "battery.config_voltage");
     if (!std::isnan(bat_config_voltage) && bat_config_voltage >= 1.0f && bat_config_voltage <= 60.0f) {
         data.battery.config_voltage = bat_config_voltage;
+        // Use as fallback for battery voltage nominal if collection lookup failed
+        if (std::isnan(data.battery.voltage_nominal)) {
+            data.battery.voltage_nominal = bat_config_voltage;
+        }
     }
 
     // Battery full charge capacity
@@ -661,6 +685,10 @@ bool TrippLiteProtocol::read_data_descriptor(UpsData &data) {
     if (descriptor_needs_raw_extraction_ && !std::isnan(data.power.input_voltage)) {
         data.power.input_voltage *= descriptor_voltage_scale_;
     }
+    // Treat near-zero input voltage as absent (on battery, no grid)
+    if (!std::isnan(data.power.input_voltage) && data.power.input_voltage < 1.0f) {
+        data.power.input_voltage = NAN;
+    }
 
     // Input frequency (in Input collection)
     data.power.frequency = read_usage_in_collection(map, report_cache,
@@ -673,6 +701,10 @@ bool TrippLiteProtocol::read_data_descriptor(UpsData &data) {
     }
     if (descriptor_needs_raw_extraction_ && !std::isnan(data.power.frequency)) {
         data.power.frequency *= descriptor_frequency_scale_;
+    }
+    // Treat near-zero frequency as absent (on battery, no grid)
+    if (!std::isnan(data.power.frequency) && data.power.frequency < 1.0f) {
+        data.power.frequency = NAN;
     }
 
     // --- Output data ---
@@ -809,8 +841,10 @@ bool TrippLiteProtocol::read_data_descriptor(UpsData &data) {
             data.power.status = status::ONLINE;
         } else if (!std::isnan(present) && present > 0) {
             data.power.status = status::ONLINE;
+        } else if (!std::isnan(data.power.output_voltage) && data.power.output_voltage > 10.0f) {
+            data.power.status = status::ONLINE;  // Output present, assume online
         } else {
-            data.power.status = status::ONLINE;  // Default assumption
+            data.power.status = status::UNKNOWN;
         }
     }
 

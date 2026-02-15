@@ -116,7 +116,66 @@ sensor:
     state_class: measurement
     accuracy_decimals: 0
 
-  # Calculated power consumption
+  # Live power measurements
+  - platform: ups_hid
+    ups_hid_id: ups_monitor
+    name: "Output Current"
+    id: output_current
+    type: output_current
+    unit_of_measurement: "A"
+    device_class: current
+    state_class: measurement
+    accuracy_decimals: 1
+
+  - platform: ups_hid
+    ups_hid_id: ups_monitor
+    name: "Active Power"
+    id: active_power
+    type: active_power
+    unit_of_measurement: "W"
+    device_class: power
+    state_class: measurement
+    accuracy_decimals: 0
+
+  - platform: ups_hid
+    ups_hid_id: ups_monitor
+    name: "Output Frequency"
+    id: output_frequency
+    type: output_frequency
+    unit_of_measurement: "Hz"
+    state_class: measurement
+    accuracy_decimals: 1
+
+  # Battery capacity details
+  - platform: ups_hid
+    ups_hid_id: ups_monitor
+    name: "Battery Config Voltage"
+    id: battery_config_voltage
+    type: battery_config_voltage
+    unit_of_measurement: "V"
+    device_class: voltage
+    state_class: measurement
+    accuracy_decimals: 1
+
+  - platform: ups_hid
+    ups_hid_id: ups_monitor
+    name: "Battery Full Charge Capacity"
+    id: battery_full_charge_capacity
+    type: battery_full_charge_capacity
+    unit_of_measurement: "%"
+    state_class: measurement
+    accuracy_decimals: 0
+
+  - platform: ups_hid
+    ups_hid_id: ups_monitor
+    name: "Battery Design Capacity"
+    id: battery_design_capacity
+    type: battery_design_capacity
+    unit_of_measurement: "%"
+    state_class: measurement
+    accuracy_decimals: 0
+
+  # Calculated power consumption (fallback if active_power not available)
   - platform: template
     name: "UPS Load Power"
     id: ups_load_power
@@ -125,14 +184,16 @@ sensor:
     state_class: measurement
     accuracy_decimals: 1
     lambda: |-
+      // Prefer live active power reading from device
+      if (!std::isnan(id(active_power).state) && id(active_power).state > 0) {
+        return id(active_power).state;
+      }
+      // Fall back to calculated estimate
       if (!std::isnan(id(load_percentage).state)) {
-        float ups_max_power = 700.0; // Default fallback
-        
-        // Use HID nominal power if available
+        float ups_max_power = 700.0;
         if (!std::isnan(id(ups_realpower_nominal).state)) {
           ups_max_power = id(ups_realpower_nominal).state;
         }
-        
         return (ups_max_power * id(load_percentage).state) / 100.0;
       }
       return NAN;
