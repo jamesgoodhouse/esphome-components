@@ -503,9 +503,11 @@ void NutServerComponent::handle_list_var(NutClient &client, const std::string &a
   // Standard NUT variables mapping to actual UPS data
   // Comprehensive list matching what NUT's usbhid-ups driver reports
   std::vector<std::string> variables = {
-    "battery.capacity", "battery.charge", "battery.mfr.date", "battery.runtime", "battery.type",
+    "battery.capacity", "battery.charge", "battery.charge.low", "battery.charge.warning",
+    "battery.mfr.date", "battery.runtime", "battery.type",
     "battery.voltage", "battery.voltage.low", "battery.voltage.nominal",
-    "device.mfr", "device.model", "device.type",
+    "device.mfr", "device.model", "device.serial", "device.type",
+    "driver.name", "driver.version", "driver.version.internal",
     "input.frequency", "input.voltage", "input.voltage.nominal",
     "input.transfer.low", "input.transfer.high",
     "output.current", "output.frequency", "output.frequency.nominal",
@@ -514,7 +516,7 @@ void NutServerComponent::handle_list_var(NutClient &client, const std::string &a
     "ups.firmware", "ups.load",
     "ups.mfr", "ups.model",
     "ups.power.nominal", "ups.realpower", "ups.realpower.nominal",
-    "ups.serial", "ups.status",
+    "ups.serial", "ups.status", "ups.test.result",
     "ups.timer.reboot", "ups.timer.shutdown",
   };
   
@@ -526,6 +528,8 @@ void NutServerComponent::handle_list_var(NutClient &client, const std::string &a
   }
   
   response += "END LIST VAR " + ups_name + "\n";
+  ESP_LOGD(TAG, "LIST VAR response: %zu bytes, %zu variables", response.length(),
+           std::count(response.begin(), response.end(), '\n') - 2);
   send_response(client, response);
 }
 
@@ -839,16 +843,29 @@ void NutServerComponent::handle_legacy_list_vars(NutClient &client, const std::s
 
 bool NutServerComponent::send_response(NutClient &client, const std::string &response) {
 #ifdef USE_ESP32
-  int bytes_sent = send(client.socket_fd, response.c_str(), response.length(), 0);
-  if (bytes_sent < 0) {
-    if (errno == ECONNRESET || errno == EPIPE || errno == ENOTCONN) {
-      ESP_LOGD(TAG, "Client connection reset (error %d)", errno);
-    } else {
-      ESP_LOGW(TAG, "Send error: %d", errno);
+  size_t total_sent = 0;
+  size_t remaining = response.length();
+  const char* data = response.c_str();
+
+  while (remaining > 0) {
+    int bytes_sent = send(client.socket_fd, data + total_sent, remaining, 0);
+    if (bytes_sent < 0) {
+      if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        // Socket buffer full, wait briefly and retry
+        delay(1);
+        continue;
+      }
+      if (errno == ECONNRESET || errno == EPIPE || errno == ENOTCONN) {
+        ESP_LOGD(TAG, "Client connection reset (error %d)", errno);
+      } else {
+        ESP_LOGW(TAG, "Send error: %d (sent %zu/%zu bytes)", errno, total_sent, response.length());
+      }
+      return false;
     }
-    return false;
+    total_sent += bytes_sent;
+    remaining -= bytes_sent;
   }
-  return bytes_sent == (int)response.length();
+  return true;
 #else
   return false;
 #endif
@@ -875,12 +892,20 @@ std::string NutServerComponent::get_ups_var(const std::string &var_name) {
   // Map variable names to data using data provider pattern
   if (var_name == "ups.mfr") return get_ups_manufacturer();
   if (var_name == "ups.model") return get_ups_model();
+
+  // Driver identification (always available, required by some NUT clients)
+  if (var_name == "driver.name") return "usbhid-ups";
+  if (var_name == "driver.version") return NUT_VERSION;
+  if (var_name == "driver.version.internal") return "ESPHome UPS HID";
   
   if (ups_hid_) {
     auto ups_data = ups_hid_->get_ups_data();
     
     // Device information variables
     if (var_name == "ups.serial" && !ups_data.device.serial_number.empty()) {
+      return ups_data.device.serial_number;
+    }
+    if (var_name == "device.serial" && !ups_data.device.serial_number.empty()) {
       return ups_data.device.serial_number;
     }
     if (var_name == "ups.firmware" && !ups_data.device.firmware_version.empty()) {
@@ -918,6 +943,12 @@ std::string NutServerComponent::get_ups_var(const std::string &var_name) {
     }
     if (var_name == "battery.capacity" && !std::isnan(ups_data.battery.design_capacity)) {
       return format_nut_value(std::to_string(ups_data.battery.design_capacity));
+    }
+    if (var_name == "battery.charge.low" && !std::isnan(ups_data.battery.charge_low)) {
+      return std::to_string(static_cast<int>(ups_data.battery.charge_low));
+    }
+    if (var_name == "battery.charge.warning" && !std::isnan(ups_data.battery.charge_warning)) {
+      return std::to_string(static_cast<int>(ups_data.battery.charge_warning));
     }
 
     // Input power variables
@@ -1002,6 +1033,11 @@ std::string NutServerComponent::get_ups_var(const std::string &var_name) {
         return std::to_string(ups_data.test.timer_reboot);
       }
       return "-1";
+    }
+
+    // Test result
+    if (var_name == "ups.test.result" && !ups_data.test.ups_test_result.empty()) {
+      return ups_data.test.ups_test_result;
     }
   }
   
