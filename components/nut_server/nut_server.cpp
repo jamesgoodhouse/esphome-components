@@ -318,88 +318,85 @@ void NutServerComponent::process_command(NutClient &client, const std::string &c
   } else if (cmd == "UPSDVER") {
     handle_upsdver(client);
   }
-  // Commands requiring authentication
+  // Read-only commands: LIST and GET do NOT require authentication per NUT protocol.
+  // Any NUT client (including monitoring tools like Synology) can query UPS status
+  // without providing credentials.
+  else if (cmd == "LIST") {
+    size_t sub_pos = args.find(' ');
+    std::string subcmd = (sub_pos != std::string::npos) ? 
+                         args.substr(0, sub_pos) : args;
+    std::string subargs = (sub_pos != std::string::npos) ? 
+                          args.substr(sub_pos + 1) : "";
+    
+    std::transform(subcmd.begin(), subcmd.end(), subcmd.begin(), ::toupper);
+    
+    if (subcmd == "UPS") {
+      handle_list_ups(client);
+    } else if (subcmd == "VAR") {
+      handle_list_var(client, subargs);
+    } else if (subcmd == "CMD") {
+      handle_list_cmd(client, subargs);
+    } else if (subcmd == "CLIENTS") {
+      handle_list_clients(client);
+    } else if (subcmd == "RW") {
+      handle_list_rwvar(client, subargs);
+    } else if (subcmd == "ENUM") {
+      handle_list_enum(client, subargs);
+    } else if (subcmd == "RANGE") {
+      handle_list_range(client, subargs);
+    } else {
+      send_error(client, "INVALID-ARGUMENT");
+    }
+  } else if (cmd == "GET") {
+    size_t sub_pos = args.find(' ');
+    std::string subcmd = (sub_pos != std::string::npos) ? 
+                         args.substr(0, sub_pos) : args;
+    std::string subargs = (sub_pos != std::string::npos) ? 
+                          args.substr(sub_pos + 1) : "";
+    
+    std::transform(subcmd.begin(), subcmd.end(), subcmd.begin(), ::toupper);
+    
+    if (subcmd == "VAR") {
+      handle_get_var(client, subargs);
+    } else if (subcmd == "NUMLOGINS") {
+      handle_get_numlogins(client, subargs);
+    } else if (subcmd == "UPSDESC") {
+      handle_get_upsdesc(client, subargs);
+    } else if (subcmd == "DESC") {
+      handle_get_desc(client, subargs);
+    } else if (subcmd == "TYPE") {
+      handle_get_type(client, subargs);
+    } else {
+      send_error(client, "INVALID-ARGUMENT");
+    }
+  } else if (cmd == get_ups_name()) {
+    // Legacy upsc -l format: sends UPS name directly as command
+    handle_legacy_list_vars(client, cmd);
+  }
+  // Write commands: SET, INSTCMD, FSD require authentication
   else if (!password_.empty() && !client.is_authenticated()) {
     send_error(client, "ACCESS-DENIED");
-  } else {
-    // Authenticated commands
-    if (cmd == "LIST") {
-      // Parse LIST subcommand
-      size_t sub_pos = args.find(' ');
-      std::string subcmd = (sub_pos != std::string::npos) ? 
-                           args.substr(0, sub_pos) : args;
-      std::string subargs = (sub_pos != std::string::npos) ? 
-                            args.substr(sub_pos + 1) : "";
-      
-      std::transform(subcmd.begin(), subcmd.end(), subcmd.begin(), ::toupper);
-      
-      if (subcmd == "UPS") {
-        handle_list_ups(client);
-      } else if (subcmd == "VAR") {
-        handle_list_var(client, subargs);
-      } else if (subcmd == "CMD") {
-        handle_list_cmd(client, subargs);
-      } else if (subcmd == "CLIENTS") {
-        handle_list_clients(client);
-      } else if (subcmd == "RW") {
-        handle_list_rwvar(client, subargs);
-      } else if (subcmd == "ENUM") {
-        handle_list_enum(client, subargs);
-      } else if (subcmd == "RANGE") {
-        handle_list_range(client, subargs);
-      } else {
-        send_error(client, "INVALID-ARGUMENT");
-      }
-    } else if (cmd == "GET") {
-      // Parse GET subcommand
-      size_t sub_pos = args.find(' ');
-      std::string subcmd = (sub_pos != std::string::npos) ? 
-                           args.substr(0, sub_pos) : args;
-      std::string subargs = (sub_pos != std::string::npos) ? 
-                            args.substr(sub_pos + 1) : "";
-      
-      std::transform(subcmd.begin(), subcmd.end(), subcmd.begin(), ::toupper);
-      
-      if (subcmd == "VAR") {
-        handle_get_var(client, subargs);
-      } else if (subcmd == "NUMLOGINS") {
-        handle_get_numlogins(client, subargs);
-      } else if (subcmd == "UPSDESC") {
-        handle_get_upsdesc(client, subargs);
-      } else if (subcmd == "DESC") {
-        handle_get_desc(client, subargs);
-      } else if (subcmd == "TYPE") {
-        handle_get_type(client, subargs);
-      } else {
-        send_error(client, "INVALID-ARGUMENT");
-      }
-    } else if (cmd == "SET") {
-      // Parse SET subcommand
-      size_t sub_pos = args.find(' ');
-      std::string subcmd = (sub_pos != std::string::npos) ? 
-                           args.substr(0, sub_pos) : args;
-      std::string subargs = (sub_pos != std::string::npos) ? 
-                            args.substr(sub_pos + 1) : "";
-      
-      std::transform(subcmd.begin(), subcmd.end(), subcmd.begin(), ::toupper);
-      
-      if (subcmd == "VAR") {
-        handle_set_var(client, subargs);
-      } else {
-        send_error(client, "INVALID-ARGUMENT");
-      }
-    } else if (cmd == "INSTCMD") {
-      handle_instcmd(client, args);
-    } else if (cmd == "FSD") {
-      handle_fsd(client, args);
-    } else if (cmd == get_ups_name()) {
-      // Legacy upsc -l format: sends UPS name directly as command
-      // This is for old-style variable name support
-      handle_legacy_list_vars(client, cmd);
+  } else if (cmd == "SET") {
+    size_t sub_pos = args.find(' ');
+    std::string subcmd = (sub_pos != std::string::npos) ? 
+                         args.substr(0, sub_pos) : args;
+    std::string subargs = (sub_pos != std::string::npos) ? 
+                          args.substr(sub_pos + 1) : "";
+    
+    std::transform(subcmd.begin(), subcmd.end(), subcmd.begin(), ::toupper);
+    
+    if (subcmd == "VAR") {
+      handle_set_var(client, subargs);
     } else {
-      ESP_LOGW(TAG, "Unknown command received: '%s' with args: '%s'", cmd.c_str(), args.c_str());
-      send_error(client, "UNKNOWN-COMMAND");
+      send_error(client, "INVALID-ARGUMENT");
     }
+  } else if (cmd == "INSTCMD") {
+    handle_instcmd(client, args);
+  } else if (cmd == "FSD") {
+    handle_fsd(client, args);
+  } else {
+    ESP_LOGW(TAG, "Unknown command received: '%s' with args: '%s'", cmd.c_str(), args.c_str());
+    send_error(client, "UNKNOWN-COMMAND");
   }
 }
 
