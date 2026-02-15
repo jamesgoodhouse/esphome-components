@@ -846,24 +846,33 @@ bool NutServerComponent::send_response(NutClient &client, const std::string &res
   // Log the response being sent
   // DEBUG: short summary (first line + size for long responses)
   // VERBOSE: full response content, line by line
-  if (response.length() <= 120) {
+  if (response.length() <= 200 && response.find('\n') == response.length() - 1) {
+    // Single-line response: log inline (strip trailing newline)
     std::string trimmed = response;
     while (!trimmed.empty() && (trimmed.back() == '\n' || trimmed.back() == '\r'))
       trimmed.pop_back();
     ESP_LOGD(TAG, "  -> %s", trimmed.c_str());
-  } else {
-    size_t first_nl = response.find('\n');
-    std::string first_line = (first_nl != std::string::npos) ? response.substr(0, first_nl) : response;
-    ESP_LOGD(TAG, "  -> %s ... (%zu bytes total)", first_line.c_str(), response.length());
-
-    // At VERBOSE level, log every line of the response
+  } else if (response.length() <= 500) {
+    // Short multi-line response (e.g. LIST UPS): log each line at DEBUG
     size_t pos = 0;
     while (pos < response.length()) {
       size_t nl = response.find('\n', pos);
       if (nl == std::string::npos) nl = response.length();
       std::string line = response.substr(pos, nl - pos);
       if (!line.empty()) {
-        ESP_LOGV(TAG, "  -> %s", line.c_str());
+        ESP_LOGD(TAG, "  -> %s", line.c_str());
+      }
+      pos = nl + 1;
+    }
+  } else {
+    // Long response (e.g. LIST VAR): log every line at DEBUG
+    size_t pos = 0;
+    while (pos < response.length()) {
+      size_t nl = response.find('\n', pos);
+      if (nl == std::string::npos) nl = response.length();
+      std::string line = response.substr(pos, nl - pos);
+      if (!line.empty()) {
+        ESP_LOGD(TAG, "  -> %s", line.c_str());
       }
       pos = nl + 1;
     }
