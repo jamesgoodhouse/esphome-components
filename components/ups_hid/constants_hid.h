@@ -138,6 +138,40 @@
 #define HID_USAGE_BAT_I_OEM_INFORMATION         0x008F
 
 // =============================================================================
+// Tripp Lite Vendor-Specific Usage IDs (Page 0xFFFF)
+// From NUT tripplite-hid.c tripplite_usage_lkp[]
+// =============================================================================
+
+#define HID_USAGE_PAGE_TRIPPLITE_VENDOR         0xFFFF
+
+#define HID_USAGE_TL_CUSTOM                     0x0010
+#define HID_USAGE_TL_DELAY_BEFORE_STARTUP       0x0056  // In minutes
+#define HID_USAGE_TL_LOW_VOLTAGE_TRANSFER_MAX   0x0057
+#define HID_USAGE_TL_LOW_VOLTAGE_TRANSFER_MIN   0x0058
+#define HID_USAGE_TL_HIGH_VOLTAGE_TRANSFER_MAX  0x0059
+#define HID_USAGE_TL_HIGH_VOLTAGE_TRANSFER_MIN  0x005A
+#define HID_USAGE_TL_OUTLET_STATE               0x007A
+#define HID_USAGE_TL_OUTLET_COUNT               0x007B
+#define HID_USAGE_TL_UPS_FIRMWARE_VERSION       0x007C
+#define HID_USAGE_TL_COMM_PROTOCOL_VERSION      0x007D
+#define HID_USAGE_TL_COMM_VERSION               0x007E  // USB firmware version
+#define HID_USAGE_TL_I_UPS_PART_NUMBER          0x007F  // String index to Part Number
+#define HID_USAGE_TL_AUTO_ON_DELAY              0x0080
+#define HID_USAGE_TL_WATCHDOG                   0x0092
+#define HID_USAGE_TL_OUTLETS_AVAILABLE_MASK     0x0095
+#define HID_USAGE_TL_OUTLETS_STATUS_MASK        0x0096
+
+// Tripp Lite page-confusion workarounds: these usages should be on page 0x85
+// but some TL devices put them on page 0x84 instead
+#define HID_USAGE_TL_CHARGING                   0x0044  // On page 0x84 instead of 0x85
+#define HID_USAGE_TL_DISCHARGING                0x0045  // On page 0x84 instead of 0x85
+#define HID_USAGE_TL_NEED_REPLACEMENT           0x004B  // On page 0x84 instead of 0x85
+#define HID_USAGE_TL_AC_PRESENT                 0x00D0  // On page 0x84 instead of 0x85
+
+// Helper for Tripp Lite vendor usages
+#define HID_USAGE_TL(usage)             HID_USAGE(HID_USAGE_PAGE_TRIPPLITE_VENDOR, usage)
+
+// =============================================================================
 // Regional Voltage Standards (IEC 60038)
 // =============================================================================
 
