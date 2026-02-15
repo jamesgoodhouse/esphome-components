@@ -922,13 +922,17 @@ bool TrippLiteProtocol::read_data_descriptor(UpsData &data) {
                    !std::isnan(data.power.load_percent);
 
     if (success) {
+        char cur_buf[8] = "?";
+        if (!std::isnan(data.power.output_current)) {
+            snprintf(cur_buf, sizeof(cur_buf), "%.1f", data.power.output_current);
+        }
         ESP_LOGI(TL_TAG, "Data read OK (descriptor): bat=%s%%, in=%sV, out=%sV, load=%s%%, freq=%sHz, cur=%sA, pwr=%sW",
                  !std::isnan(data.battery.level) ? std::to_string(static_cast<int>(data.battery.level)).c_str() : "?",
                  !std::isnan(data.power.input_voltage) ? std::to_string(static_cast<int>(data.power.input_voltage)).c_str() : "?",
                  !std::isnan(data.power.output_voltage) ? std::to_string(static_cast<int>(data.power.output_voltage)).c_str() : "?",
                  !std::isnan(data.power.load_percent) ? std::to_string(static_cast<int>(data.power.load_percent)).c_str() : "?",
                  !std::isnan(data.power.frequency) ? std::to_string(static_cast<int>(data.power.frequency)).c_str() : "?",
-                 !std::isnan(data.power.output_current) ? std::to_string(data.power.output_current).c_str() : "?",
+                 cur_buf,
                  !std::isnan(data.power.active_power) ? std::to_string(static_cast<int>(data.power.active_power)).c_str() : "?");
 
         // Log unused descriptor fields on the 3rd read cycle.
