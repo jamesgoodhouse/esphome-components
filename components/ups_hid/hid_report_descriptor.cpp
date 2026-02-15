@@ -731,6 +731,27 @@ const char* HidReportMap::usage_name(uint32_t usage) {
     default: break;
   }
 
+  // Tripp Lite Vendor-Specific Page (0xFFFF)
+  switch (usage) {
+    case HID_USAGE_TL(HID_USAGE_TL_CUSTOM): return "TL:Custom";
+    case HID_USAGE_TL(HID_USAGE_TL_DELAY_BEFORE_STARTUP): return "TL:DelayBeforeStartup";
+    case HID_USAGE_TL(HID_USAGE_TL_LOW_VOLTAGE_TRANSFER_MAX): return "TL:LowVoltageTransferMax";
+    case HID_USAGE_TL(HID_USAGE_TL_LOW_VOLTAGE_TRANSFER_MIN): return "TL:LowVoltageTransferMin";
+    case HID_USAGE_TL(HID_USAGE_TL_HIGH_VOLTAGE_TRANSFER_MAX): return "TL:HighVoltageTransferMax";
+    case HID_USAGE_TL(HID_USAGE_TL_HIGH_VOLTAGE_TRANSFER_MIN): return "TL:HighVoltageTransferMin";
+    case HID_USAGE_TL(HID_USAGE_TL_OUTLET_STATE): return "TL:OutletState";
+    case HID_USAGE_TL(HID_USAGE_TL_OUTLET_COUNT): return "TL:OutletCount";
+    case HID_USAGE_TL(HID_USAGE_TL_UPS_FIRMWARE_VERSION): return "TL:FirmwareVersion";
+    case HID_USAGE_TL(HID_USAGE_TL_COMM_PROTOCOL_VERSION): return "TL:CommProtocolVersion";
+    case HID_USAGE_TL(HID_USAGE_TL_COMM_VERSION): return "TL:CommVersion";
+    case HID_USAGE_TL(HID_USAGE_TL_I_UPS_PART_NUMBER): return "TL:iPartNumber";
+    case HID_USAGE_TL(HID_USAGE_TL_AUTO_ON_DELAY): return "TL:AutoOnDelay";
+    case HID_USAGE_TL(HID_USAGE_TL_WATCHDOG): return "TL:Watchdog";
+    case HID_USAGE_TL(HID_USAGE_TL_OUTLETS_AVAILABLE_MASK): return "TL:OutletsAvailMask";
+    case HID_USAGE_TL(HID_USAGE_TL_OUTLETS_STATUS_MASK): return "TL:OutletsStatusMask";
+    default: break;
+  }
+
   return nullptr;
 }
 

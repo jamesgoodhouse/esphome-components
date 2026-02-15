@@ -1,6 +1,7 @@
 #include "protocol_factory.h"
 #include "protocol_apc.h"
 #include "protocol_cyberpower.h"
+#include "protocol_tripplite.h"
 #include "protocol_generic.h"
 #include "constants_ups.h"
 #include "ups_hid.h"
@@ -61,6 +62,18 @@ void ProtocolFactory::ensure_initialized() {
             cp_info.priority = 100;
             vendor_reg[usb::VENDOR_ID_CYBERPOWER].push_back(cp_info);
             ESP_LOGD(FACTORY_TAG, "Explicitly registered CyberPower HID Protocol for vendor 0x%04X", usb::VENDOR_ID_CYBERPOWER);
+        }
+        
+        // Register Tripp Lite protocol for vendor 0x09AE
+        if (vendor_reg.find(usb::VENDOR_ID_TRIPPLITE) == vendor_reg.end()) {
+            ProtocolInfo tl_info;
+            tl_info.creator = create_tripplite_protocol;
+            tl_info.name = "Tripp Lite HID Protocol";
+            tl_info.description = "Tripp Lite USB HID UPS protocol with vendor-specific scaling";
+            tl_info.supported_vendors = {usb::VENDOR_ID_TRIPPLITE};
+            tl_info.priority = 100;
+            vendor_reg[usb::VENDOR_ID_TRIPPLITE].push_back(tl_info);
+            ESP_LOGD(FACTORY_TAG, "Explicitly registered Tripp Lite HID Protocol for vendor 0x%04X", usb::VENDOR_ID_TRIPPLITE);
         }
         
         // Register Generic fallback protocol
