@@ -170,7 +170,7 @@ esp_err_t Esp32UsbTransport::hid_get_report(uint8_t report_type, uint8_t report_
 
                 ESP_LOGD(ESP32_USB_TAG, "HID GET_REPORT success: received %zu bytes", *data_len);
             } else {
-                ESP_LOGW(ESP32_USB_TAG, "HID GET_REPORT: No data received");
+                ESP_LOGD(ESP32_USB_TAG, "HID GET_REPORT: No data received for report 0x%02X", report_id);
                 *data_len = 0;
                 ret = ESP_FAIL;
             }
