@@ -32,7 +32,7 @@ nut_server:
   ups_name: "office_ups"        # Optional: UPS name in NUT (default: ups_hid ID)
   username: "nutuser"           # Optional: Username for authentication
   password: "secretpass"        # Optional: Password (empty = no auth)
-  max_clients: 4                # Optional: Max simultaneous clients (1-10, default: 4)
+  max_clients: 8                # Optional: Max simultaneous clients (1-20, default: 8)
 ```
 
 ### Complete Example with UPS HID

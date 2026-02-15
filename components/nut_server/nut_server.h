@@ -32,7 +32,8 @@ static constexpr size_t MAX_COMMAND_LENGTH = 256;
 static constexpr size_t MAX_RESPONSE_LENGTH = 2048;
 static constexpr uint8_t DEFAULT_MAX_CLIENTS = 8;
 static constexpr uint8_t MAX_LOGIN_ATTEMPTS = 3;
-static constexpr uint32_t CLIENT_TIMEOUT_MS = 60000;  // 60 seconds
+static constexpr uint32_t CLIENT_TIMEOUT_MS = 30000;  // 30 seconds
+static constexpr uint32_t SEND_TIMEOUT_MS = 3000;     // 3 seconds max for send_response
 
 // NUT protocol version
 static constexpr const char* NUT_VERSION = "2.8.0";

@@ -11,6 +11,7 @@
 #ifdef USE_ESP32
 #include "lwip/err.h"
 #include "lwip/sys.h"
+#include "lwip/sockets.h"
 #include <fcntl.h>
 #include <errno.h>
 #endif
@@ -179,45 +180,72 @@ void NutServerComponent::server_task(void *param) {
 
 void NutServerComponent::accept_clients() {
 #ifdef USE_ESP32
-  struct sockaddr_in client_addr;
-  socklen_t client_len = sizeof(client_addr);
-  
-  int client_socket = accept(server_socket_, (struct sockaddr *)&client_addr, &client_len);
-  if (client_socket < 0) {
-    if (errno != EWOULDBLOCK && errno != EAGAIN) {
-      ESP_LOGW(TAG, "Accept failed: %d", errno);
+  // Drain all pending connections from the accept queue
+  for (;;) {
+    struct sockaddr_in client_addr;
+    socklen_t client_len = sizeof(client_addr);
+    
+    int client_socket = accept(server_socket_, (struct sockaddr *)&client_addr, &client_len);
+    if (client_socket < 0) {
+      if (errno != EWOULDBLOCK && errno != EAGAIN) {
+        ESP_LOGW(TAG, "Accept failed: %d", errno);
+      }
+      return;  // No more pending connections
     }
-    return;
-  }
-  
-  // Set client socket to non-blocking
-  int flags = fcntl(client_socket, F_GETFL, 0);
-  fcntl(client_socket, F_SETFL, flags | O_NONBLOCK);
-  
-  // Find available client slot
-  std::lock_guard<std::mutex> lock(clients_mutex_);
-  for (auto &client : clients_) {
-    if (!client.is_active()) {
-      client.socket_fd = client_socket;
-      client.state = ClientState::CONNECTED;
-      uint32_t now = millis();
-      client.last_activity = now;
-      client.connect_time = now;
-      client.login_attempts = 0;
-      client.remote_ip = std::string(inet_ntoa(client_addr.sin_addr));
-      
-      ESP_LOGD(TAG, "Client connected from %s", client.remote_ip.c_str());
-      
-      // NUT protocol: No initial greeting - wait for client commands
-      return;
+    
+    // Set client socket to non-blocking
+    int flags = fcntl(client_socket, F_GETFL, 0);
+    fcntl(client_socket, F_SETFL, flags | O_NONBLOCK);
+    
+    // Enable TCP keepalive to detect dead connections faster
+    int keepAlive = 1;
+    setsockopt(client_socket, SOL_SOCKET, SO_KEEPALIVE, &keepAlive, sizeof(keepAlive));
+#if defined(TCP_KEEPIDLE) && defined(TCP_KEEPINTVL) && defined(TCP_KEEPCNT)
+    int keepIdle = 10;      // Start probes after 10 seconds idle
+    int keepInterval = 5;   // Probe every 5 seconds
+    int keepCount = 3;      // Disconnect after 3 failed probes
+    setsockopt(client_socket, IPPROTO_TCP, TCP_KEEPIDLE, &keepIdle, sizeof(keepIdle));
+    setsockopt(client_socket, IPPROTO_TCP, TCP_KEEPINTVL, &keepInterval, sizeof(keepInterval));
+    setsockopt(client_socket, IPPROTO_TCP, TCP_KEEPCNT, &keepCount, sizeof(keepCount));
+#endif
+    
+    // Find available client slot
+    std::lock_guard<std::mutex> lock(clients_mutex_);
+    bool assigned = false;
+    for (auto &client : clients_) {
+      if (!client.is_active()) {
+        client.socket_fd = client_socket;
+        client.state = ClientState::CONNECTED;
+        uint32_t now = millis();
+        client.last_activity = now;
+        client.connect_time = now;
+        client.login_attempts = 0;
+        client.remote_ip = std::string(inet_ntoa(client_addr.sin_addr));
+        
+        ESP_LOGD(TAG, "Client connected from %s", client.remote_ip.c_str());
+        assigned = true;
+        break;
+      }
+    }
+    
+    if (!assigned) {
+      // Count active clients and their IPs for diagnostics
+      uint8_t active = 0;
+      std::string active_ips;
+      for (const auto &c : clients_) {
+        if (c.is_active()) {
+          active++;
+          if (!active_ips.empty()) active_ips += ", ";
+          active_ips += c.remote_ip;
+        }
+      }
+      ESP_LOGW(TAG, "Maximum clients (%d/%d) reached, rejecting from %s. Active: [%s]",
+               active, max_clients_, inet_ntoa(client_addr.sin_addr), active_ips.c_str());
+      const char *msg = "ERR MAX-CLIENTS Maximum number of clients reached\n";
+      send(client_socket, msg, strlen(msg), 0);
+      close(client_socket);
     }
   }
-  
-  // No available slots
-  ESP_LOGW(TAG, "Maximum clients reached, rejecting connection");
-  const char *msg = "ERR MAX-CLIENTS Maximum number of clients reached\n";
-  send(client_socket, msg, strlen(msg), 0);
-  close(client_socket);
 #endif
 }
 
@@ -241,17 +269,15 @@ void NutServerComponent::handle_client(NutClient &client) {
     process_command(client, std::string(buffer));
     
   } else if (bytes_received == 0) {
-    // Client disconnected
-    ESP_LOGD(TAG, "Client disconnected");
+    // Client disconnected cleanly
+    ESP_LOGD(TAG, "Client %s disconnected", client.remote_ip.c_str());
     disconnect_client(client);
   } else {
     if (errno != EWOULDBLOCK && errno != EAGAIN) {
       if (errno == ECONNRESET || errno == EPIPE) {
-        // Client abruptly disconnected - this is normal, log at debug level
-        ESP_LOGD(TAG, "Client connection reset (error %d)", errno);
+        ESP_LOGD(TAG, "Client %s connection reset (error %d)", client.remote_ip.c_str(), errno);
       } else {
-        // Other errors are more concerning
-        ESP_LOGW(TAG, "Receive error: %d", errno);
+        ESP_LOGW(TAG, "Receive error %d from %s", errno, client.remote_ip.c_str());
       }
       disconnect_client(client);
     }
@@ -274,7 +300,9 @@ void NutServerComponent::cleanup_inactive_clients() {
   
   for (auto &client : clients_) {
     if (client.is_active() && (now - client.last_activity) > CLIENT_TIMEOUT_MS) {
-      ESP_LOGD(TAG, "Client timeout, disconnecting");
+      ESP_LOGD(TAG, "Client %s timed out after %lus, disconnecting",
+               client.remote_ip.c_str(),
+               (unsigned long)((now - client.last_activity) / 1000));
       disconnect_client(client);
     }
   }
@@ -863,36 +891,29 @@ void NutServerComponent::handle_legacy_list_vars(NutClient &client, const std::s
 
 bool NutServerComponent::send_response(NutClient &client, const std::string &response) {
 #ifdef USE_ESP32
-  // Log the response being sent
-  // DEBUG: short summary (first line + size for long responses)
-  // VERBOSE: full response content, line by line
-  if (response.length() <= 200 && response.find('\n') == response.length() - 1) {
-    // Single-line response: log inline (strip trailing newline)
+  // Count lines for logging
+  size_t line_count = 0;
+  for (char c : response) {
+    if (c == '\n') line_count++;
+  }
+
+  if (line_count <= 1 && response.length() <= 200) {
+    // Single-line response: log inline at DEBUG (strip trailing newline)
     std::string trimmed = response;
     while (!trimmed.empty() && (trimmed.back() == '\n' || trimmed.back() == '\r'))
       trimmed.pop_back();
     ESP_LOGD(TAG, "  -> %s", trimmed.c_str());
-  } else if (response.length() <= 500) {
-    // Short multi-line response (e.g. LIST UPS): log each line at DEBUG
-    size_t pos = 0;
-    while (pos < response.length()) {
-      size_t nl = response.find('\n', pos);
-      if (nl == std::string::npos) nl = response.length();
-      std::string line = response.substr(pos, nl - pos);
-      if (!line.empty()) {
-        ESP_LOGD(TAG, "  -> %s", line.c_str());
-      }
-      pos = nl + 1;
-    }
   } else {
-    // Long response (e.g. LIST VAR): log every line at DEBUG
+    // Multi-line response: compact summary at DEBUG, per-line at VERBOSE
+    ESP_LOGD(TAG, "  -> [%zu bytes, %zu lines]", response.length(), line_count);
+    // Per-line content only at VERBOSE to avoid blocking the server task
     size_t pos = 0;
     while (pos < response.length()) {
       size_t nl = response.find('\n', pos);
       if (nl == std::string::npos) nl = response.length();
       std::string line = response.substr(pos, nl - pos);
       if (!line.empty()) {
-        ESP_LOGD(TAG, "  -> %s", line.c_str());
+        ESP_LOGV(TAG, "  -> %s", line.c_str());
       }
       pos = nl + 1;
     }
@@ -901,20 +922,32 @@ bool NutServerComponent::send_response(NutClient &client, const std::string &res
   size_t total_sent = 0;
   size_t remaining = response.length();
   const char* data = response.c_str();
+  uint32_t send_start = millis();
 
   while (remaining > 0) {
+    // Check send timeout to prevent blocking the server task
+    if ((millis() - send_start) > SEND_TIMEOUT_MS) {
+      ESP_LOGW(TAG, "Send timeout after %lums (sent %zu/%zu bytes) to %s, disconnecting",
+               (unsigned long)(millis() - send_start), total_sent, response.length(),
+               client.remote_ip.c_str());
+      disconnect_client(client);
+      return false;
+    }
+
     int bytes_sent = send(client.socket_fd, data + total_sent, remaining, 0);
     if (bytes_sent < 0) {
       if (errno == EAGAIN || errno == EWOULDBLOCK) {
-        // Socket buffer full, wait briefly and retry
+        // Socket buffer full, yield briefly and retry (with timeout protection above)
         delay(1);
         continue;
       }
       if (errno == ECONNRESET || errno == EPIPE || errno == ENOTCONN) {
-        ESP_LOGD(TAG, "Client connection reset (error %d)", errno);
+        ESP_LOGD(TAG, "Client %s connection reset (error %d)", client.remote_ip.c_str(), errno);
       } else {
-        ESP_LOGW(TAG, "Send error: %d (sent %zu/%zu bytes)", errno, total_sent, response.length());
+        ESP_LOGW(TAG, "Send error: %d (sent %zu/%zu bytes) to %s",
+                 errno, total_sent, response.length(), client.remote_ip.c_str());
       }
+      disconnect_client(client);
       return false;
     }
     total_sent += bytes_sent;
