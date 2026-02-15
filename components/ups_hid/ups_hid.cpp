@@ -8,7 +8,7 @@
 #include "protocol_factory.h"
 #include "protocol_apc.h"
 #include "protocol_cyberpower.h"
- 
+#include "protocol_tripplite.h"
 #include "protocol_generic.h"
 #include "esphome/core/log.h"
 #include "esphome/core/application.h"

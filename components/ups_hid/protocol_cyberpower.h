@@ -123,5 +123,8 @@ class CyberPowerProtocol : public UpsProtocolBase {
   float parse_frequency_from_report(const HidReport &report);
 };
 
+// Factory creator function declaration
+std::unique_ptr<UpsProtocolBase> create_cyberpower_protocol(UpsHidComponent* parent);
+
 }  // namespace ups_hid
 }  // namespace esphome

@@ -1,4 +1,9 @@
 #include "protocol_factory.h"
+#include "protocol_apc.h"
+#include "protocol_cyberpower.h"
+#include "protocol_tripplite.h"
+#include "protocol_generic.h"
+#include "constants_ups.h"
 #include "ups_hid.h"
 #include "esphome/core/log.h"
 #include <algorithm>
@@ -22,12 +27,69 @@ ProtocolFactory::get_fallback_registry() {
 }
 
 void ProtocolFactory::ensure_initialized() {
-    // Registries are initialized on first access due to static storage
-    // This function exists for explicit initialization if needed
     static bool initialized = false;
     if (!initialized) {
-        ESP_LOGD(FACTORY_TAG, "Protocol factory registries initialized");
         initialized = true;
+        
+        // Explicitly register all built-in protocols.
+        // Static self-registration via global constructors can be unreliable on
+        // ESP32/ESP-IDF when the linker strips translation units with no direct
+        // symbol references. This explicit registration guarantees all protocols
+        // are available regardless of link-time optimizations.
+        
+        auto& vendor_reg = get_vendor_registry();
+        auto& fallback_reg = get_fallback_registry();
+        
+        // Register APC protocol for vendor 0x051D (if not already registered)
+        if (vendor_reg.find(usb::VENDOR_ID_APC) == vendor_reg.end()) {
+            ProtocolInfo apc_info;
+            apc_info.creator = create_apc_protocol;
+            apc_info.name = "APC HID Protocol";
+            apc_info.description = "APC Back-UPS and Smart-UPS HID protocol";
+            apc_info.supported_vendors = {usb::VENDOR_ID_APC};
+            apc_info.priority = 100;
+            vendor_reg[usb::VENDOR_ID_APC].push_back(apc_info);
+            ESP_LOGD(FACTORY_TAG, "Explicitly registered APC HID Protocol for vendor 0x%04X", usb::VENDOR_ID_APC);
+        }
+        
+        // Register CyberPower protocol for vendor 0x0764
+        if (vendor_reg.find(usb::VENDOR_ID_CYBERPOWER) == vendor_reg.end()) {
+            ProtocolInfo cp_info;
+            cp_info.creator = create_cyberpower_protocol;
+            cp_info.name = "CyberPower HID Protocol";
+            cp_info.description = "CyberPower CP series HID protocol";
+            cp_info.supported_vendors = {usb::VENDOR_ID_CYBERPOWER};
+            cp_info.priority = 100;
+            vendor_reg[usb::VENDOR_ID_CYBERPOWER].push_back(cp_info);
+            ESP_LOGD(FACTORY_TAG, "Explicitly registered CyberPower HID Protocol for vendor 0x%04X", usb::VENDOR_ID_CYBERPOWER);
+        }
+        
+        // Register Tripp Lite protocol for vendor 0x09AE
+        if (vendor_reg.find(usb::VENDOR_ID_TRIPPLITE) == vendor_reg.end()) {
+            ProtocolInfo tl_info;
+            tl_info.creator = create_tripplite_protocol;
+            tl_info.name = "Tripp Lite HID Protocol";
+            tl_info.description = "Tripp Lite USB HID UPS protocol with vendor-specific scaling";
+            tl_info.supported_vendors = {usb::VENDOR_ID_TRIPPLITE};
+            tl_info.priority = 100;
+            vendor_reg[usb::VENDOR_ID_TRIPPLITE].push_back(tl_info);
+            ESP_LOGD(FACTORY_TAG, "Explicitly registered Tripp Lite HID Protocol for vendor 0x%04X", usb::VENDOR_ID_TRIPPLITE);
+        }
+        
+        // Register Generic fallback protocol
+        if (fallback_reg.empty()) {
+            ProtocolInfo gen_info;
+            gen_info.creator = create_generic_protocol;
+            gen_info.name = "Generic HID Protocol";
+            gen_info.description = "Universal HID protocol fallback for unknown UPS vendors";
+            gen_info.supported_vendors = {};
+            gen_info.priority = 10;
+            fallback_reg.push_back(gen_info);
+            ESP_LOGD(FACTORY_TAG, "Explicitly registered Generic HID fallback protocol");
+        }
+        
+        ESP_LOGD(FACTORY_TAG, "Protocol factory initialized: %zu vendor entries, %zu fallback entries",
+                 vendor_reg.size(), fallback_reg.size());
     }
 }
 
@@ -36,10 +98,22 @@ void ProtocolFactory::register_protocol_for_vendor(uint16_t vendor_id,
     ensure_initialized();
     
     auto& registry = get_vendor_registry();
-    registry[vendor_id].push_back(info);
+    
+    // Check for duplicate registration (can happen when both static initializers
+    // and explicit registration in ensure_initialized() succeed)
+    auto& entries = registry[vendor_id];
+    for (const auto& existing : entries) {
+        if (existing.name == info.name) {
+            ESP_LOGD(FACTORY_TAG, "Protocol '%s' already registered for vendor 0x%04X, skipping",
+                     info.name.c_str(), vendor_id);
+            return;
+        }
+    }
+    
+    entries.push_back(info);
     
     // Sort by priority (higher first)
-    std::sort(registry[vendor_id].begin(), registry[vendor_id].end(),
+    std::sort(entries.begin(), entries.end(),
               [](const ProtocolInfo& a, const ProtocolInfo& b) {
                   return a.priority > b.priority;
               });
@@ -52,6 +126,16 @@ void ProtocolFactory::register_fallback_protocol(const ProtocolInfo& info) {
     ensure_initialized();
     
     auto& registry = get_fallback_registry();
+    
+    // Check for duplicate registration
+    for (const auto& existing : registry) {
+        if (existing.name == info.name) {
+            ESP_LOGD(FACTORY_TAG, "Fallback protocol '%s' already registered, skipping",
+                     info.name.c_str());
+            return;
+        }
+    }
+    
     registry.push_back(info);
     
     // Sort by priority (higher first)

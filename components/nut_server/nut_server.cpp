@@ -362,6 +362,14 @@ void NutServerComponent::process_command(NutClient &client, const std::string &c
       
       if (subcmd == "VAR") {
         handle_get_var(client, subargs);
+      } else if (subcmd == "NUMLOGINS") {
+        handle_get_numlogins(client, subargs);
+      } else if (subcmd == "UPSDESC") {
+        handle_get_upsdesc(client, subargs);
+      } else if (subcmd == "DESC") {
+        handle_get_desc(client, subargs);
+      } else if (subcmd == "TYPE") {
+        handle_get_type(client, subargs);
       } else {
         send_error(client, "INVALID-ARGUMENT");
       }
@@ -397,42 +405,72 @@ void NutServerComponent::process_command(NutClient &client, const std::string &c
 
 void NutServerComponent::handle_login(NutClient &client, const std::string &args) {
   auto parts = split_args(args);
-  // client could already submitted login information through its correspondening commands
-  if (client.state == ClientState::AUTHENTICATED)
-  {
-    client.login_attempts++;
-    if (client.login_attempts >= MAX_LOGIN_ATTEMPTS)
-    {
-      ESP_LOGW(TAG, "Max login attempts exceeded, disconnecting client");
-      disconnect_client(client);
+  
+  // Standard NUT LOGIN flow: LOGIN <upsname>
+  // This is called after USERNAME and PASSWORD commands have been processed.
+  // The client should already be authenticated via the PASSWORD handler.
+  
+  // If client is already authenticated (via USERNAME/PASSWORD flow), just accept LOGIN
+  if (client.state == ClientState::AUTHENTICATED) {
+    // Verify UPS name if provided
+    if (parts.size() == 1 && parts[0] != get_ups_name()) {
+      send_error(client, "UNKNOWN-UPS");
       return;
     }
     send_response(client, "OK\n");
-    ESP_LOGD(TAG, "Client already connected");
+    ESP_LOGD(TAG, "Client login accepted for UPS %s", get_ups_name().c_str());
     return;
   }
-
-  // client isn't authenticated and did not provide any credentials
-  if (parts.size() != 2)
-  {
-    send_error(client, "INVALID-ARGUMENT");
-    return;
-  }
-
-  if (authenticate(parts[0], parts[1])) {
-    client.state = ClientState::AUTHENTICATED;
-    client.username = parts[0];
-    send_response(client, "OK\n");
-    ESP_LOGD(TAG, "Client authenticated as %s", parts[0].c_str());
-  } else {
-    client.login_attempts++;
-    if (client.login_attempts >= MAX_LOGIN_ATTEMPTS) {
-      ESP_LOGW(TAG, "Max login attempts exceeded, disconnecting client");
-      disconnect_client(client);
-    } else {
-      send_error(client, "ACCESS-DENIED");
+  
+  // Standard NUT protocol: LOGIN <upsname> (1 argument)
+  // Authentication should have been done via USERNAME + PASSWORD commands
+  if (parts.size() == 1) {
+    // If no password is configured, allow login without authentication
+    if (password_.empty()) {
+      client.state = ClientState::AUTHENTICATED;
+      send_response(client, "OK\n");
+      ESP_LOGD(TAG, "Client login accepted (no auth required) for UPS %s", parts[0].c_str());
+      return;
     }
+    
+    // Password is required but client hasn't authenticated
+    // Check if temp credentials were provided via USERNAME/PASSWORD
+    if (!client.temp_username.empty() && !client.temp_password.empty()) {
+      if (authenticate(client.temp_username, client.temp_password)) {
+        client.state = ClientState::AUTHENTICATED;
+        client.username = client.temp_username;
+        client.temp_username.clear();
+        client.temp_password.clear();
+        send_response(client, "OK\n");
+        ESP_LOGD(TAG, "Client authenticated via LOGIN as %s", client.username.c_str());
+        return;
+      }
+    }
+    
+    send_error(client, "ACCESS-DENIED");
+    return;
   }
+  
+  // Legacy format: LOGIN <username> <password> (2 arguments, non-standard)
+  if (parts.size() == 2) {
+    if (authenticate(parts[0], parts[1])) {
+      client.state = ClientState::AUTHENTICATED;
+      client.username = parts[0];
+      send_response(client, "OK\n");
+      ESP_LOGD(TAG, "Client authenticated as %s (legacy login)", parts[0].c_str());
+    } else {
+      client.login_attempts++;
+      if (client.login_attempts >= MAX_LOGIN_ATTEMPTS) {
+        ESP_LOGW(TAG, "Max login attempts exceeded, disconnecting client");
+        disconnect_client(client);
+      } else {
+        send_error(client, "ACCESS-DENIED");
+      }
+    }
+    return;
+  }
+  
+  send_error(client, "INVALID-ARGUMENT");
 }
 
 void NutServerComponent::handle_logout(NutClient &client) {
@@ -466,13 +504,20 @@ void NutServerComponent::handle_list_var(NutClient &client, const std::string &a
   std::string response = "BEGIN LIST VAR " + ups_name + "\n";
   
   // Standard NUT variables mapping to actual UPS data
+  // Comprehensive list matching what NUT's usbhid-ups driver reports
   std::vector<std::string> variables = {
-    "ups.mfr", "ups.model", "ups.status", "ups.serial", "ups.firmware",
-    "battery.charge", "battery.voltage", "battery.voltage.nominal", "battery.runtime",
-    "input.voltage", "input.voltage.nominal", "input.frequency", 
+    "battery.charge", "battery.runtime", "battery.type",
+    "battery.voltage", "battery.voltage.nominal",
+    "device.mfr", "device.model", "device.type",
+    "input.frequency", "input.voltage", "input.voltage.nominal",
     "input.transfer.low", "input.transfer.high",
-    "output.voltage", "output.voltage.nominal", 
-    "ups.load", "ups.realpower.nominal", "ups.power.nominal"
+    "output.frequency.nominal", "output.voltage", "output.voltage.nominal",
+    "ups.beeper.status", "ups.delay.shutdown",
+    "ups.firmware", "ups.load",
+    "ups.mfr", "ups.model",
+    "ups.power.nominal", "ups.realpower.nominal",
+    "ups.serial", "ups.status",
+    "ups.timer.reboot", "ups.timer.shutdown",
   };
   
   for (const auto &var : variables) {
@@ -505,6 +550,81 @@ void NutServerComponent::handle_get_var(NutClient &client, const std::string &ar
   } else {
     send_error(client, "VAR-NOT-SUPPORTED");
   }
+}
+
+void NutServerComponent::handle_get_numlogins(NutClient &client, const std::string &args) {
+  if (args != get_ups_name()) {
+    send_error(client, "UNKNOWN-UPS");
+    return;
+  }
+  
+  // Count authenticated clients that have sent LOGIN for this UPS
+  int num_logins = 0;
+  for (const auto &c : clients_) {
+    if (c.is_authenticated()) {
+      num_logins++;
+    }
+  }
+  
+  std::string response = "NUMLOGINS " + get_ups_name() + " " + std::to_string(num_logins) + "\n";
+  send_response(client, response);
+}
+
+void NutServerComponent::handle_get_upsdesc(NutClient &client, const std::string &args) {
+  if (args != get_ups_name()) {
+    send_error(client, "UNKNOWN-UPS");
+    return;
+  }
+  
+  std::string response = "UPSDESC " + get_ups_name() + " \"" + get_ups_description() + "\"\n";
+  send_response(client, response);
+}
+
+void NutServerComponent::handle_get_desc(NutClient &client, const std::string &args) {
+  auto parts = split_args(args);
+  if (parts.size() != 2) {
+    send_error(client, "INVALID-ARGUMENT");
+    return;
+  }
+  
+  if (parts[0] != get_ups_name()) {
+    send_error(client, "UNKNOWN-UPS");
+    return;
+  }
+  
+  // Return a generic description for all supported variables
+  std::string response = "DESC " + get_ups_name() + " " + parts[1] + " \"" + parts[1] + "\"\n";
+  send_response(client, response);
+}
+
+void NutServerComponent::handle_get_type(NutClient &client, const std::string &args) {
+  auto parts = split_args(args);
+  if (parts.size() != 2) {
+    send_error(client, "INVALID-ARGUMENT");
+    return;
+  }
+  
+  if (parts[0] != get_ups_name()) {
+    send_error(client, "UNKNOWN-UPS");
+    return;
+  }
+  
+  // Check if the variable exists
+  std::string value = get_ups_var(parts[1]);
+  if (value.empty()) {
+    send_error(client, "VAR-NOT-SUPPORTED");
+    return;
+  }
+  
+  // Determine type based on variable name
+  // RW variables (writable)
+  std::string var_type = "RO";
+  if (parts[1] == "ups.delay.shutdown") {
+    var_type = "RW STRING";
+  }
+  
+  std::string response = "TYPE " + get_ups_name() + " " + parts[1] + " " + var_type + "\n";
+  send_response(client, response);
 }
 
 void NutServerComponent::handle_list_cmd(NutClient &client, const std::string &args) {
@@ -769,6 +889,11 @@ std::string NutServerComponent::get_ups_var(const std::string &var_name) {
       return ups_data.device.firmware_version;
     }
     
+    // Device variables (NUT-compatible aliases)
+    if (var_name == "device.mfr") return get_ups_manufacturer();
+    if (var_name == "device.model") return get_ups_model();
+    if (var_name == "device.type") return "ups";
+    
     // Battery variables
     if (var_name == "battery.charge") {
       float battery_level = ups_hid_->get_battery_level();
@@ -783,6 +908,9 @@ std::string NutServerComponent::get_ups_var(const std::string &var_name) {
     if (var_name == "battery.runtime") {
       float runtime_minutes = ups_hid_->get_runtime_minutes();
       if (runtime_minutes > 0) return std::to_string(static_cast<int>(runtime_minutes * 60));
+    }
+    if (var_name == "battery.type" && !ups_data.battery.type.empty()) {
+      return ups_data.battery.type;
     }
     
     // Input power variables
@@ -811,6 +939,17 @@ std::string NutServerComponent::get_ups_var(const std::string &var_name) {
     if (var_name == "output.voltage.nominal" && !std::isnan(ups_data.power.output_voltage_nominal)) {
       return format_nut_value(std::to_string(ups_data.power.output_voltage_nominal));
     }
+    if (var_name == "output.frequency.nominal" && !std::isnan(ups_data.power.input_voltage_nominal)) {
+      // Output frequency nominal - typically matches region (60Hz US, 50Hz EU)
+      // Use the input frequency as reference if available, otherwise estimate from nominal voltage
+      if (!std::isnan(ups_data.power.frequency)) {
+        return std::to_string(static_cast<int>(std::round(ups_data.power.frequency)));
+      }
+      // Estimate from nominal voltage: US/JP=60Hz, EU=50Hz
+      if (!std::isnan(ups_data.power.input_voltage_nominal)) {
+        return ups_data.power.input_voltage_nominal <= 130.0f ? "60" : "50";
+      }
+    }
     
     // Load and power variables
     if (var_name == "ups.load") {
@@ -822,6 +961,31 @@ std::string NutServerComponent::get_ups_var(const std::string &var_name) {
     }
     if (var_name == "ups.power.nominal" && !std::isnan(ups_data.power.apparent_power_nominal)) {
       return std::to_string(static_cast<int>(ups_data.power.apparent_power_nominal));
+    }
+    
+    // Beeper status
+    if (var_name == "ups.beeper.status" && !ups_data.config.beeper_status.empty()) {
+      return ups_data.config.beeper_status;
+    }
+    
+    // Delay configuration
+    if (var_name == "ups.delay.shutdown" && ups_data.config.delay_shutdown >= 0) {
+      return std::to_string(ups_data.config.delay_shutdown);
+    }
+    
+    // Timer values
+    // NUT standard: -1 means inactive/not counting down
+    if (var_name == "ups.timer.shutdown") {
+      if (ups_data.test.timer_shutdown >= 0) {
+        return std::to_string(ups_data.test.timer_shutdown);
+      }
+      return "-1";
+    }
+    if (var_name == "ups.timer.reboot") {
+      if (ups_data.test.timer_reboot >= 0) {
+        return std::to_string(ups_data.test.timer_reboot);
+      }
+      return "-1";
     }
   }
   

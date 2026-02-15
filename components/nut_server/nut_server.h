@@ -122,6 +122,10 @@ protected:
   void handle_password(NutClient &client, const std::string &args);
   void handle_fsd(NutClient &client, const std::string &args);
   void handle_set_var(NutClient &client, const std::string &args);
+  void handle_get_numlogins(NutClient &client, const std::string &args);
+  void handle_get_upsdesc(NutClient &client, const std::string &args);
+  void handle_get_desc(NutClient &client, const std::string &args);
+  void handle_get_type(NutClient &client, const std::string &args);
   void handle_list_rwvar(NutClient &client, const std::string &args);
   void handle_list_enum(NutClient &client, const std::string &args);
   void handle_list_range(NutClient &client, const std::string &args);
