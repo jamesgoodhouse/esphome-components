@@ -292,14 +292,14 @@ bool UpsHidComponent::read_ups_data() {
 
   std::lock_guard<std::mutex> lock(data_mutex_);
 
-  // Preserve the detected protocol before reset
-  DeviceInfo::DetectedProtocol current_protocol = ups_data_.device.detected_protocol;
+  // Preserve device info across read cycles (it's static and only read once)
+  DeviceInfo saved_device = ups_data_.device;
 
   // Reset data before reading
   ups_data_.reset();
 
-  // Restore the detected protocol after reset
-  ups_data_.device.detected_protocol = current_protocol;
+  // Restore device info (manufacturer, model, serial, firmware, protocol, etc.)
+  ups_data_.device = saved_device;
 
   // Read data through protocol
   bool success = active_protocol_->read_data(ups_data_);

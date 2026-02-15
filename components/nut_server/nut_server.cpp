@@ -292,11 +292,17 @@ void NutServerComponent::process_command(NutClient &client, const std::string &c
   std::string args = (space_pos != std::string::npos) ? 
                       command.substr(space_pos + 1) : "";
   
-  // Debug: Log all received commands
-  ESP_LOGD(TAG, "Received command: '%s' args: '%s'", cmd.c_str(), args.c_str());
-  
   // Convert command to uppercase for comparison
   std::transform(cmd.begin(), cmd.end(), cmd.begin(), ::toupper);
+
+  // Handle STARTTLS silently (sent on every connection by most clients)
+  if (cmd == "STARTTLS") {
+    handle_starttls(client);
+    return;
+  }
+
+  // Log all other commands
+  ESP_LOGD(TAG, "Received command: '%s' args: '%s'", cmd.c_str(), args.c_str());
   
   // Commands that don't require authentication
   if (cmd == "HELP") {
@@ -305,8 +311,6 @@ void NutServerComponent::process_command(NutClient &client, const std::string &c
     handle_version(client);
   } else if (cmd == "NETVER") {
     handle_netver(client);
-  } else if (cmd == "STARTTLS") {
-    handle_starttls(client);
   } else if (cmd == "USERNAME") {
     handle_username(client, args);
   } else if (cmd == "PASSWORD") {
@@ -723,8 +727,24 @@ void NutServerComponent::handle_upsdver(NutClient &client) {
 }
 
 void NutServerComponent::handle_starttls(NutClient &client) {
-  // STARTTLS is not supported (we don't have TLS/SSL)
-  send_error(client, "FEATURE-NOT-SUPPORTED");
+  // STARTTLS is not supported (we don't have TLS/SSL).
+  // Most clients (Synology, upsmon) send this on every connection and
+  // gracefully fall back to plaintext. Don't log at DEBUG to reduce noise.
+  std::string response = "ERR FEATURE-NOT-SUPPORTED\n";
+#ifdef USE_ESP32
+  size_t total_sent = 0;
+  size_t remaining = response.length();
+  const char* data = response.c_str();
+  while (remaining > 0) {
+    int bytes_sent = send(client.socket_fd, data + total_sent, remaining, 0);
+    if (bytes_sent < 0) {
+      if (errno == EAGAIN || errno == EWOULDBLOCK) { delay(1); continue; }
+      return;
+    }
+    total_sent += bytes_sent;
+    remaining -= bytes_sent;
+  }
+#endif
 }
 
 void NutServerComponent::handle_username(NutClient &client, const std::string &args) {
