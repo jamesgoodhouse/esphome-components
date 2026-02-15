@@ -93,6 +93,15 @@ class HidReportMap {
    */
   void log_field_summary(const char* tag, const std::set<uint32_t>& queried_usages) const;
 
+  /**
+   * Log the actual values of all unused descriptor fields.
+   * Reads values from the report cache to show what the device is reporting.
+   */
+  void log_unused_field_values(
+      const char* tag,
+      const std::set<uint32_t>& queried_usages,
+      const std::map<uint8_t, std::vector<uint8_t>>& report_cache) const;
+
  private:
   std::vector<HidField> fields_;
 };

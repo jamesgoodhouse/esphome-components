@@ -802,5 +802,95 @@ void HidReportMap::log_field_summary(
   }
 }
 
+// =============================================================================
+// Dump actual values of unused fields
+// =============================================================================
+
+void HidReportMap::log_unused_field_values(
+    const char* tag,
+    const std::set<uint32_t>& queried_usages,
+    const std::map<uint8_t, std::vector<uint8_t>>& report_cache) const {
+  const char* t = tag ? tag : TAG;
+
+  // Skip fields with usage 0 (padding) and string descriptor indices
+  // (they're just USB string table indices, not data values)
+  auto is_string_usage = [](uint32_t usage) -> bool {
+    uint16_t uid = usage & 0xFFFF;
+    uint16_t page = (usage >> 16) & 0xFFFF;
+    if (page == HID_USAGE_PAGE_POWER_DEVICE) {
+      return uid == HID_USAGE_POW_I_MANUFACTURER ||
+             uid == HID_USAGE_POW_I_PRODUCT ||
+             uid == HID_USAGE_POW_I_SERIAL_NUMBER ||
+             uid == HID_USAGE_POW_I_NAME;
+    }
+    if (page == HID_USAGE_PAGE_BATTERY_SYSTEM) {
+      return uid == HID_USAGE_BAT_I_MANUFACTURER_NAME ||
+             uid == HID_USAGE_BAT_I_DEVICE_NAME ||
+             uid == HID_USAGE_BAT_I_DEVICE_CHEMISTRY;
+    }
+    return false;
+  };
+
+  int logged = 0;
+  std::string batch;
+  int batch_count = 0;
+  constexpr int FIELDS_PER_LINE = 3;
+
+  for (const auto& f : fields_) {
+    if (queried_usages.count(f.usage)) continue;
+    if (f.usage == 0) continue;  // Skip padding bits
+    if (is_string_usage(f.usage)) continue;  // Skip string indices
+
+    // Look up report data in cache
+    auto it = report_cache.find(f.report_id);
+    if (it == report_cache.end()) continue;
+
+    float val = extract_raw_value(f, it->second.data(), it->second.size());
+
+    uint16_t page = (f.usage >> 16) & 0xFFFF;
+    uint16_t uid = f.usage & 0xFFFF;
+    const char* name = usage_name(f.usage);
+    const char* parent_name = nullptr;
+    if (!f.usage_path.empty()) {
+      parent_name = usage_name(f.usage_path.back());
+    }
+
+    // Format: "RID:Name=value" or "RID:Page:ID=value"
+    char entry[96];
+    if (name && parent_name) {
+      snprintf(entry, sizeof(entry), "0x%02X:%s.%s=%g",
+               f.report_id, parent_name, name, val);
+    } else if (name) {
+      snprintf(entry, sizeof(entry), "0x%02X:%s=%g",
+               f.report_id, name, val);
+    } else if (parent_name) {
+      snprintf(entry, sizeof(entry), "0x%02X:%s.P%02X:%04X=%g",
+               f.report_id, parent_name, page, uid, val);
+    } else {
+      snprintf(entry, sizeof(entry), "0x%02X:P%02X:%04X=%g",
+               f.report_id, page, uid, val);
+    }
+
+    if (!batch.empty()) batch += " | ";
+    batch += entry;
+    batch_count++;
+
+    if (batch_count >= FIELDS_PER_LINE) {
+      ESP_LOGI(t, "  VALUES: %s", batch.c_str());
+      batch.clear();
+      batch_count = 0;
+    }
+    logged++;
+  }
+
+  if (!batch.empty()) {
+    ESP_LOGI(t, "  VALUES: %s", batch.c_str());
+  }
+
+  if (logged == 0) {
+    ESP_LOGI(t, "  No non-padding unused fields to show values for");
+  }
+}
+
 }  // namespace ups_hid
 }  // namespace esphome

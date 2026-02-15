@@ -933,8 +933,9 @@ bool TrippLiteProtocol::read_data_descriptor(UpsData &data) {
                  cur_buf,
                  !std::isnan(data.power.active_power) ? std::to_string(static_cast<int>(data.power.active_power)).c_str() : "?");
 
-        // Log unused descriptor fields summary
+        // Log unused descriptor fields summary and their values
         map->log_field_summary(TL_TAG, queried_usages_);
+        map->log_unused_field_values(TL_TAG, queried_usages_, report_cache);
     } else {
         ESP_LOGW(TL_TAG, "Descriptor-based reading produced no usable data, falling back to heuristic");
         use_descriptor_ = false;
