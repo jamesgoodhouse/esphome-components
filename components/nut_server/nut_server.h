@@ -30,7 +30,7 @@ static const char *const TAG = "nut_server";
 static constexpr uint16_t DEFAULT_NUT_PORT = 3493;
 static constexpr size_t MAX_COMMAND_LENGTH = 256;
 static constexpr size_t MAX_RESPONSE_LENGTH = 2048;
-static constexpr uint8_t DEFAULT_MAX_CLIENTS = 4;
+static constexpr uint8_t DEFAULT_MAX_CLIENTS = 8;
 static constexpr uint8_t MAX_LOGIN_ATTEMPTS = 3;
 static constexpr uint32_t CLIENT_TIMEOUT_MS = 60000;  // 60 seconds
 
@@ -90,7 +90,7 @@ public:
   void set_username(const std::string &username) { username_ = username; }
   void set_password(const std::string &password) { password_ = password; }
   void set_max_clients(uint8_t max_clients) { 
-    max_clients_ = std::min(max_clients, static_cast<uint8_t>(10)); 
+    max_clients_ = std::min(max_clients, static_cast<uint8_t>(20)); 
   }
   void set_ups_name(const std::string &ups_name) { ups_name_ = ups_name; }
 

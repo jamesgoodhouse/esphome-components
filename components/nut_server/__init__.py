@@ -31,7 +31,7 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Optional(CONF_PORT, default=3493): cv.port,
         cv.Optional(CONF_USERNAME, default="nutuser"): cv.string,
         cv.Optional(CONF_PASSWORD, default=""): cv.string,
-        cv.Optional(CONF_MAX_CLIENTS, default=4): cv.int_range(min=1, max=10),
+        cv.Optional(CONF_MAX_CLIENTS, default=8): cv.int_range(min=1, max=20),
         cv.Optional(CONF_UPS_NAME): cv.string,
     }
 ).extend(cv.COMPONENT_SCHEMA)
