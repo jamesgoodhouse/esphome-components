@@ -117,7 +117,6 @@ private:
     // Tracks which usages were queried during descriptor-based reading,
     // so we can report which descriptor fields are unused.
     std::set<uint32_t> queried_usages_;
-    uint8_t descriptor_read_count_{0};  // Track reads to delay summary logging
 
     // Helper: extract a single usage value from cached report data
     float read_usage_value(const HidReportMap* map,
