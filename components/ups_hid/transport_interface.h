@@ -2,6 +2,7 @@
 
 #include "esp_err.h"
 #include <vector>
+#include <string>
 #include <cstdint>
 #include <memory>
 
@@ -41,6 +42,9 @@ public:
     // String descriptors
     virtual esp_err_t get_string_descriptor(uint8_t string_index, 
                                           std::string& result) = 0;
+    
+    // HID report descriptor (returns raw descriptor bytes)
+    virtual esp_err_t get_hid_report_descriptor(std::vector<uint8_t>& descriptor) = 0;
     
     // Error information
     virtual std::string get_last_error() const = 0;

@@ -3,6 +3,7 @@
 #include "ups_hid.h"
 #include "data_composite.h"
 #include "data_device.h"
+#include "hid_report_descriptor.h"
 #include <set>
 #include <map>
 
@@ -12,16 +13,17 @@ namespace ups_hid {
 /**
  * Tripp Lite HID Protocol Implementation
  * 
- * Based on NUT tripplite-hid.c subdriver analysis and the USB HID Power Device
- * Class specification. Supports Tripp Lite UPS devices that use standard HID
- * Power Device class (vendor ID 0x09AE).
+ * Supports two data reading strategies:
+ * 1. **Descriptor-based** (preferred): Parses the device's HID report descriptor
+ *    to know exactly which report ID contains which data field. Handles unit
+ *    exponents and physical conversion automatically.
+ * 2. **Heuristic** (fallback): Reads all reports and classifies values by range.
+ *    Used when the report descriptor cannot be fetched or parsed.
  * 
  * Key Tripp Lite quirks handled:
- * - Battery voltage scaling: 0.1 factor for product IDs in 0x2xxx range
- * - Some models use page 0x84 instead of 0x85 for charging/discharging status
+ * - Battery voltage scaling: 0.1 factor for product IDs in 0x2xxx range (heuristic mode only)
  * - Timer values of 65535 (0xFFFF) mean "inactive/disabled"
  * - Beeper control: AudibleAlarmControl with 1=disable, 2=enable, 3=mute
- * - Some newer models (PID 0x3016, 0x3024) need additional voltage/frequency scaling
  * 
  * Reference: https://github.com/networkupstools/nut/blob/master/drivers/tripplite-hid.c
  */
@@ -73,30 +75,55 @@ private:
         HidReport() : report_id(0) {}
     };
 
+    // === Strategy selection ===
+    bool use_descriptor_{false};  // true = descriptor-based, false = heuristic
+
+    // === Heuristic mode state ===
     // Scaling factors (determined by product ID, matching NUT tripplite-hid.c)
-    double battery_scale_{0.1};        // Default for 0x2xxx PIDs (ECO/OMNI series)
-    double io_voltage_scale_{1.0};     // Default: no I/O voltage scaling
-    double io_frequency_scale_{1.0};   // Default: no frequency scaling
-    double io_current_scale_{1.0};     // Default: no current scaling
+    double battery_scale_{0.1};
+    double io_voltage_scale_{1.0};
+    double io_frequency_scale_{1.0};
+    double io_current_scale_{1.0};
     
-    // Report discovery state
+    // Report discovery state (used by both modes)
     std::set<uint8_t> available_input_reports_;
     std::set<uint8_t> available_feature_reports_;
     std::map<uint8_t, size_t> report_sizes_;
     bool device_info_read_{false};
     
-    // HID communication methods
+    // === HID communication ===
     bool read_hid_report(uint8_t report_id, HidReport &report);
     bool write_hid_feature_report(uint8_t report_id, const uint8_t* data, size_t len);
     
-    // Report discovery
-    void enumerate_reports();
-    void determine_scaling_factors();
+    // === Initialization helpers ===
+    void enumerate_reports();              // Brute-force enumeration (heuristic mode)
+    void enumerate_reports_from_descriptor(); // Descriptor-based enumeration
+    void determine_scaling_factors();      // Heuristic mode only
     
-    // Device information reading
+    // === Device information ===
     void read_device_information(UpsData &data);
     
-    // Parser methods for Tripp Lite report formats
+    // === Descriptor-based data reading (preferred) ===
+    bool read_data_descriptor(UpsData &data);
+    
+    // Helper: extract a single usage value from cached report data
+    float read_usage_value(const HidReportMap* map,
+                          const std::map<uint8_t, std::vector<uint8_t>>& cache,
+                          uint32_t usage, const char* name);
+    
+    // Helper: extract a usage value scoped to a specific collection
+    float read_usage_in_collection(const HidReportMap* map,
+                                   const std::map<uint8_t, std::vector<uint8_t>>& cache,
+                                   uint32_t usage, uint32_t collection_usage,
+                                   const char* name);
+    
+    // Helper: find the report ID for a given usage (for control commands)
+    uint8_t find_report_id_for_usage(uint32_t usage) const;
+    
+    // === Heuristic data reading (fallback) ===
+    bool read_data_heuristic(UpsData &data);
+    
+    // Heuristic parser methods
     void parse_battery_data(UpsData &data);
     void parse_power_summary(UpsData &data);
     void parse_status_flags(UpsData &data);
@@ -111,7 +138,7 @@ private:
     void parse_frequency_data(UpsData &data);
     void parse_transfer_limits(UpsData &data);
     
-    // Value extraction helpers
+    // Value extraction helpers (heuristic mode)
     float read_single_byte_value(const HidReport &report, uint8_t byte_index = 1);
     uint16_t read_16bit_le_value(const HidReport &report, uint8_t start_index = 1);
     float apply_battery_voltage_scale(float raw_value);
@@ -119,7 +146,7 @@ private:
     float apply_io_frequency_scale(float raw_value);
     
     // Timer sentinel value
-    static constexpr uint16_t TIMER_INACTIVE = 0xFFFF;  // 65535 = inactive on Tripp Lite
+    static constexpr uint16_t TIMER_INACTIVE = 0xFFFF;
 };
 
 // Factory creator function declaration

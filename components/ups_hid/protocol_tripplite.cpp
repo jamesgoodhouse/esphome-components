@@ -106,30 +106,61 @@ bool TrippLiteProtocol::initialize() {
     available_feature_reports_.clear();
     report_sizes_.clear();
     device_info_read_ = false;
+    use_descriptor_ = false;
     
-    // Determine scaling factors based on product ID
-    determine_scaling_factors();
-    
-    // Enumerate available reports
-    enumerate_reports();
+    // Check if a parsed HID report descriptor is available
+    const HidReportMap* map = parent_->get_report_map();
+    if (map && !map->get_all_fields().empty()) {
+        use_descriptor_ = true;
+        ESP_LOGI(TL_TAG, "HID report descriptor available (%zu fields) - using descriptor-based reading",
+                 map->get_all_fields().size());
+        enumerate_reports_from_descriptor();
+    } else {
+        ESP_LOGW(TL_TAG, "No HID report descriptor - falling back to heuristic discovery");
+        determine_scaling_factors();
+        enumerate_reports();
+    }
     
     if (available_input_reports_.empty() && available_feature_reports_.empty()) {
         ESP_LOGE(TL_TAG, "No HID reports found during initialization");
         return false;
     }
     
-    ESP_LOGI(TL_TAG, "Tripp Lite HID initialized: %zu input reports, %zu feature reports",
+    ESP_LOGI(TL_TAG, "Tripp Lite HID initialized (%s mode): %zu input reports, %zu feature reports",
+             use_descriptor_ ? "descriptor" : "heuristic",
              available_input_reports_.size(), available_feature_reports_.size());
     
-    // Log discovered reports at debug level
-    for (uint8_t id : available_input_reports_) {
-        ESP_LOGD(TL_TAG, "  Input report 0x%02X: %zu bytes", id, report_sizes_[id]);
-    }
     for (uint8_t id : available_feature_reports_) {
         ESP_LOGD(TL_TAG, "  Feature report 0x%02X: %zu bytes", id, report_sizes_[id]);
     }
+    for (uint8_t id : available_input_reports_) {
+        ESP_LOGD(TL_TAG, "  Input report 0x%02X: %zu bytes", id, report_sizes_[id]);
+    }
     
     return true;
+}
+
+void TrippLiteProtocol::enumerate_reports_from_descriptor() {
+    const HidReportMap* map = parent_->get_report_map();
+    if (!map) return;
+    
+    auto ids = map->get_report_ids();
+    ESP_LOGD(TL_TAG, "Descriptor contains %zu report IDs", ids.size());
+    
+    for (uint8_t id : ids) {
+        size_t feat_sz = map->get_report_size_bytes(id, HID_REPORT_TYPE_FEATURE);
+        if (feat_sz > 0) {
+            available_feature_reports_.insert(id);
+            report_sizes_[id] = feat_sz;
+        }
+        size_t inp_sz = map->get_report_size_bytes(id, HID_REPORT_TYPE_INPUT);
+        if (inp_sz > 0) {
+            available_input_reports_.insert(id);
+            if (report_sizes_.find(id) == report_sizes_.end()) {
+                report_sizes_[id] = inp_sz;
+            }
+        }
+    }
 }
 
 
@@ -366,29 +397,429 @@ float TrippLiteProtocol::apply_io_frequency_scale(float raw_value) {
 
 
 // ============================================================================
-// Main Data Reading - Discovery-based approach
-// ============================================================================
-//
-// HID report IDs are device-specific (assigned by the HID report descriptor).
-// Without parsing the descriptor, we cannot know a priori which report ID 
-// maps to which HID usage. Instead, we read ALL available reports and classify
-// them by value ranges and patterns.
-//
-// Strategy:
-// 1. Read ALL available feature reports into a map
-// 2. Log all raw data for debugging
-// 3. Classify 1-byte values by range (voltage, frequency, percentage, etc.)
-// 4. Classify 2-byte (16-bit LE) values similarly
-// 5. Populate UPS data from classified values
+// Main Data Reading - dispatch between descriptor and heuristic modes
 // ============================================================================
 
 bool TrippLiteProtocol::read_data(UpsData &data) {
-    ESP_LOGV(TL_TAG, "Reading Tripp Lite HID data (discovery mode)...");
-    
     // Read device information (once, on first successful read)
     if (!device_info_read_) {
         read_device_information(data);
     }
+    
+    if (use_descriptor_) {
+        return read_data_descriptor(data);
+    }
+    return read_data_heuristic(data);
+}
+
+
+// ============================================================================
+// Descriptor-based Data Reading (preferred)
+// ============================================================================
+//
+// Uses the parsed HID report descriptor to know exactly which report ID
+// contains which data field. The descriptor provides:
+// - Report ID for each HID usage (Voltage, Frequency, RemainingCapacity, etc.)
+// - Bit offset and size within the report
+// - Logical/physical conversion factors
+// - Unit exponents (e.g., 10^-1 for decivolts)
+//
+// This eliminates guesswork and handles all unit conversions correctly.
+// ============================================================================
+
+float TrippLiteProtocol::read_usage_value(
+    const HidReportMap* map,
+    const std::map<uint8_t, std::vector<uint8_t>>& cache,
+    uint32_t usage, const char* name) {
+    
+    const HidField* field = map->find_field_by_usage(usage);
+    if (!field) {
+        ESP_LOGV(TL_TAG, "No descriptor field for %s (usage 0x%08lX)", name, (unsigned long)usage);
+        return NAN;
+    }
+    
+    auto it = cache.find(field->report_id);
+    if (it == cache.end()) {
+        ESP_LOGV(TL_TAG, "No data for report 0x%02X (%s)", field->report_id, name);
+        return NAN;
+    }
+    
+    float val = map->extract_field_value(*field, it->second.data(), it->second.size());
+    if (!std::isnan(val)) {
+        ESP_LOGD(TL_TAG, "%s = %.2f (report 0x%02X, bits %u@%u, exp=%d)",
+                 name, val, field->report_id, field->bit_size, field->bit_offset,
+                 field->unit_exponent);
+    }
+    return val;
+}
+
+float TrippLiteProtocol::read_usage_in_collection(
+    const HidReportMap* map,
+    const std::map<uint8_t, std::vector<uint8_t>>& cache,
+    uint32_t usage, uint32_t collection_usage,
+    const char* name) {
+    
+    // Search for a field with the given usage that is nested under
+    // a collection with the given collection_usage in its path
+    const HidField* field = nullptr;
+    for (const auto& f : map->get_all_fields()) {
+        if (f.usage != usage) continue;
+        for (auto path_u : f.usage_path) {
+            if (path_u == collection_usage) {
+                field = &f;
+                break;
+            }
+        }
+        if (field) break;
+    }
+    
+    if (!field) {
+        ESP_LOGV(TL_TAG, "No field for %s (usage 0x%08lX in collection 0x%08lX)",
+                 name, (unsigned long)usage, (unsigned long)collection_usage);
+        return NAN;
+    }
+    
+    auto it = cache.find(field->report_id);
+    if (it == cache.end()) {
+        ESP_LOGV(TL_TAG, "No data for report 0x%02X (%s)", field->report_id, name);
+        return NAN;
+    }
+    
+    float val = map->extract_field_value(*field, it->second.data(), it->second.size());
+    if (!std::isnan(val)) {
+        ESP_LOGD(TL_TAG, "%s = %.2f (report 0x%02X, collection 0x%08lX)",
+                 name, val, field->report_id, (unsigned long)collection_usage);
+    }
+    return val;
+}
+
+uint8_t TrippLiteProtocol::find_report_id_for_usage(uint32_t usage) const {
+    const HidReportMap* map = parent_->get_report_map();
+    if (!map) return 0;
+    
+    const HidField* field = map->find_field_by_usage(usage);
+    return field ? field->report_id : 0;
+}
+
+bool TrippLiteProtocol::read_data_descriptor(UpsData &data) {
+    const HidReportMap* map = parent_->get_report_map();
+    if (!map) {
+        ESP_LOGW(TL_TAG, "Report map no longer available, switching to heuristic mode");
+        use_descriptor_ = false;
+        return read_data_heuristic(data);
+    }
+    
+    ESP_LOGV(TL_TAG, "Reading Tripp Lite HID data (descriptor mode)...");
+    
+    // Step 1: Read ALL available feature reports into a cache
+    std::map<uint8_t, std::vector<uint8_t>> report_cache;
+    int reports_read = 0;
+    
+    for (uint8_t rid : available_feature_reports_) {
+        HidReport report;
+        if (read_hid_report(rid, report) && !report.data.empty()) {
+            report_cache[rid] = std::move(report.data);
+            reports_read++;
+        }
+    }
+    
+    if (reports_read == 0) {
+        ESP_LOGW(TL_TAG, "No reports could be read");
+        return false;
+    }
+    
+    ESP_LOGV(TL_TAG, "Read %d/%zu reports", reports_read, available_feature_reports_.size());
+    
+    // Step 2: Extract values using the parsed descriptor
+    // Full 32-bit usages: (page << 16) | usage_id
+    
+    // --- Battery data ---
+    data.battery.level = read_usage_value(map, report_cache,
+        HID_USAGE_BAT(HID_USAGE_BAT_REMAINING_CAPACITY), "battery.charge");
+    
+    float runtime_sec = read_usage_value(map, report_cache,
+        HID_USAGE_BAT(HID_USAGE_BAT_RUN_TIME_TO_EMPTY), "battery.runtime");
+    if (!std::isnan(runtime_sec) && runtime_sec > 0) {
+        data.battery.runtime_minutes = runtime_sec / 60.0f;
+    }
+    
+    // Battery voltage - look in BatterySystem.Battery collection first
+    float bat_voltage = read_usage_in_collection(map, report_cache,
+        HID_USAGE_POW(HID_USAGE_POW_VOLTAGE),
+        HID_USAGE_BAT(0x0012),  // Battery collection
+        "battery.voltage");
+    if (!std::isnan(bat_voltage) && bat_voltage >= 1.0f && bat_voltage <= 60.0f) {
+        data.battery.voltage = bat_voltage;
+    }
+    
+    // Battery voltage nominal (ConfigVoltage in Battery collection)
+    float bat_voltage_nom = read_usage_in_collection(map, report_cache,
+        HID_USAGE_POW(HID_USAGE_POW_CONFIG_VOLTAGE),
+        HID_USAGE_BAT(0x0012),  // Battery collection
+        "battery.voltage.nominal");
+    if (!std::isnan(bat_voltage_nom) && bat_voltage_nom >= 1.0f && bat_voltage_nom <= 60.0f) {
+        data.battery.voltage_nominal = bat_voltage_nom;
+    }
+    
+    // Charging/Discharging/FullyCharged status flags
+    float charging = read_usage_value(map, report_cache,
+        HID_USAGE_BAT(HID_USAGE_BAT_CHARGING), "battery.charging");
+    float discharging = read_usage_value(map, report_cache,
+        HID_USAGE_BAT(HID_USAGE_BAT_DISCHARGING), "battery.discharging");
+    float fully_charged = read_usage_value(map, report_cache,
+        HID_USAGE_BAT(HID_USAGE_BAT_FULLY_CHARGED), "battery.fully_charged");
+    
+    if (!std::isnan(discharging) && discharging > 0) {
+        data.battery.status = battery_status::DISCHARGING;
+        data.power.status = status::ON_BATTERY;
+    } else if (!std::isnan(fully_charged) && fully_charged > 0) {
+        data.battery.status = battery_status::FULLY_CHARGED;
+    } else if (!std::isnan(charging) && charging > 0) {
+        data.battery.status = battery_status::CHARGING;
+    }
+    
+    // Need replacement flag
+    float need_replace = read_usage_value(map, report_cache,
+        HID_USAGE_BAT(HID_USAGE_BAT_NEED_REPLACEMENT), "battery.need_replacement");
+    if (!std::isnan(need_replace) && need_replace > 0) {
+        data.battery.needs_replacement = true;
+    }
+    
+    // --- Input data ---
+    // Input voltage (Voltage in Input collection)
+    data.power.input_voltage = read_usage_in_collection(map, report_cache,
+        HID_USAGE_POW(HID_USAGE_POW_VOLTAGE),
+        HID_USAGE_POW(HID_USAGE_POW_INPUT),
+        "input.voltage");
+    
+    // If not found in Input collection, try PowerSummary or first Voltage field
+    if (std::isnan(data.power.input_voltage)) {
+        data.power.input_voltage = read_usage_in_collection(map, report_cache,
+            HID_USAGE_POW(HID_USAGE_POW_VOLTAGE),
+            HID_USAGE_POW(HID_USAGE_POW_POWER_SUMMARY),
+            "input.voltage.powersummary");
+    }
+    
+    // Input frequency (in Input collection)
+    data.power.frequency = read_usage_in_collection(map, report_cache,
+        HID_USAGE_POW(HID_USAGE_POW_FREQUENCY),
+        HID_USAGE_POW(HID_USAGE_POW_INPUT),
+        "input.frequency");
+    if (std::isnan(data.power.frequency)) {
+        data.power.frequency = read_usage_value(map, report_cache,
+            HID_USAGE_POW(HID_USAGE_POW_FREQUENCY), "input.frequency.global");
+    }
+    
+    // --- Output data ---
+    // Output voltage (Voltage in Output collection)
+    data.power.output_voltage = read_usage_in_collection(map, report_cache,
+        HID_USAGE_POW(HID_USAGE_POW_VOLTAGE),
+        HID_USAGE_POW(HID_USAGE_POW_OUTPUT),
+        "output.voltage");
+    
+    // --- Load ---
+    data.power.load_percent = read_usage_value(map, report_cache,
+        HID_USAGE_POW(HID_USAGE_POW_PERCENT_LOAD), "ups.load");
+    
+    // --- Nominal / configuration values ---
+    // Config voltage (nominal input/output)
+    float config_voltage = read_usage_in_collection(map, report_cache,
+        HID_USAGE_POW(HID_USAGE_POW_CONFIG_VOLTAGE),
+        HID_USAGE_POW(HID_USAGE_POW_INPUT),
+        "input.voltage.nominal");
+    if (std::isnan(config_voltage)) {
+        config_voltage = read_usage_value(map, report_cache,
+            HID_USAGE_POW(HID_USAGE_POW_CONFIG_VOLTAGE), "voltage.nominal.global");
+    }
+    if (!std::isnan(config_voltage) && config_voltage >= 80.0f && config_voltage <= 260.0f) {
+        data.power.input_voltage_nominal = config_voltage;
+        if (std::isnan(data.power.output_voltage_nominal)) {
+            data.power.output_voltage_nominal = config_voltage;
+        }
+    }
+    
+    // Config frequency
+    float config_freq = read_usage_value(map, report_cache,
+        HID_USAGE_POW(HID_USAGE_POW_CONFIG_FREQUENCY), "input.frequency.nominal");
+    if (!std::isnan(config_freq) && config_freq >= 45.0f && config_freq <= 65.0f) {
+        data.power.input_frequency_nominal = config_freq;
+    }
+    
+    // Apparent power nominal (VA)
+    data.power.apparent_power_nominal = read_usage_value(map, report_cache,
+        HID_USAGE_POW(HID_USAGE_POW_CONFIG_APPARENT_POWER), "ups.power.nominal");
+    
+    // Active power nominal (W)
+    data.power.realpower_nominal = read_usage_value(map, report_cache,
+        HID_USAGE_POW(HID_USAGE_POW_CONFIG_ACTIVE_POWER), "ups.realpower.nominal");
+    
+    // Estimate real power if only apparent is available
+    if (std::isnan(data.power.realpower_nominal) && !std::isnan(data.power.apparent_power_nominal)) {
+        data.power.realpower_nominal = data.power.apparent_power_nominal * 0.6f;
+    }
+    
+    // --- Transfer limits ---
+    float low_transfer = read_usage_value(map, report_cache,
+        HID_USAGE_POW(HID_USAGE_POW_LOW_VOLTAGE_TRANSFER), "input.transfer.low");
+    if (!std::isnan(low_transfer)) {
+        data.power.input_transfer_low = low_transfer;
+    }
+    
+    float high_transfer = read_usage_value(map, report_cache,
+        HID_USAGE_POW(HID_USAGE_POW_HIGH_VOLTAGE_TRANSFER), "input.transfer.high");
+    if (!std::isnan(high_transfer)) {
+        data.power.input_transfer_high = high_transfer;
+    }
+    
+    // --- Status flags ---
+    // AC Present / Good / Overload / etc.
+    float present = read_usage_value(map, report_cache,
+        HID_USAGE_POW(HID_USAGE_POW_PRESENT), "ups.status.present");
+    float good = read_usage_value(map, report_cache,
+        HID_USAGE_POW(HID_USAGE_POW_GOOD), "ups.status.good");
+    float overload = read_usage_value(map, report_cache,
+        HID_USAGE_POW(HID_USAGE_POW_OVERLOAD), "ups.status.overload");
+    float internal_failure = read_usage_value(map, report_cache,
+        HID_USAGE_POW(HID_USAGE_POW_INTERNAL_FAILURE), "ups.status.internal_failure");
+    float voltage_oor = read_usage_value(map, report_cache,
+        HID_USAGE_POW(HID_USAGE_POW_VOLTAGE_OUT_OF_RANGE), "ups.status.voltage_oor");
+    float shutdown_imminent = read_usage_value(map, report_cache,
+        HID_USAGE_POW(HID_USAGE_POW_SHUTDOWN_IMMINENT), "ups.status.shutdown_imminent");
+    
+    // Determine power status
+    if (data.power.status.empty()) {
+        if (!std::isnan(discharging) && discharging > 0) {
+            data.power.status = status::ON_BATTERY;
+        } else if (!std::isnan(data.power.input_voltage) && data.power.input_voltage > 10.0f) {
+            data.power.status = status::ONLINE;
+        } else if (!std::isnan(present) && present > 0) {
+            data.power.status = status::ONLINE;
+        } else {
+            data.power.status = status::ONLINE;  // Default assumption
+        }
+    }
+    
+    if (!std::isnan(overload) && overload > 0) {
+        data.power.status = status::OVERLOAD;
+    }
+    
+    // If we found input voltage but not output, assume output = input when online
+    if (!std::isnan(data.power.input_voltage) && std::isnan(data.power.output_voltage) &&
+        data.power.status == status::ONLINE) {
+        data.power.output_voltage = data.power.input_voltage;
+    }
+    
+    // --- Beeper status ---
+    float beeper_val = read_usage_value(map, report_cache,
+        HID_USAGE_POW(HID_USAGE_POW_AUDIBLE_ALARM_CONTROL), "ups.beeper");
+    if (!std::isnan(beeper_val)) {
+        int beeper_int = static_cast<int>(beeper_val);
+        switch (beeper_int) {
+            case 1: data.config.beeper_status = "disabled"; data.config.beeper_state = ConfigData::BEEPER_DISABLED; break;
+            case 2: data.config.beeper_status = "enabled"; data.config.beeper_state = ConfigData::BEEPER_ENABLED; break;
+            case 3: data.config.beeper_status = "muted"; data.config.beeper_state = ConfigData::BEEPER_MUTED; break;
+        }
+    }
+    
+    // --- Delay/timer values ---
+    float shutdown_delay = read_usage_value(map, report_cache,
+        HID_USAGE_POW(HID_USAGE_POW_DELAY_BEFORE_SHUTDOWN), "ups.delay.shutdown");
+    if (!std::isnan(shutdown_delay)) {
+        int16_t sd = static_cast<int16_t>(shutdown_delay);
+        if (sd == static_cast<int16_t>(TIMER_INACTIVE) || sd < 0) {
+            data.test.timer_shutdown = -1;
+        } else {
+            data.config.delay_shutdown = sd;
+            data.test.timer_shutdown = sd;
+        }
+    }
+    
+    float start_delay = read_usage_value(map, report_cache,
+        HID_USAGE_POW(HID_USAGE_POW_DELAY_BEFORE_STARTUP), "ups.delay.start");
+    if (!std::isnan(start_delay)) {
+        int16_t sd = static_cast<int16_t>(start_delay);
+        if (sd == static_cast<int16_t>(TIMER_INACTIVE) || sd < 0) {
+            data.test.timer_start = -1;
+        } else {
+            data.config.delay_start = sd;
+            data.test.timer_start = sd;
+        }
+    }
+    
+    float reboot_delay = read_usage_value(map, report_cache,
+        HID_USAGE_POW(HID_USAGE_POW_DELAY_BEFORE_REBOOT), "ups.delay.reboot");
+    if (!std::isnan(reboot_delay)) {
+        int16_t rd = static_cast<int16_t>(reboot_delay);
+        if (rd == static_cast<int16_t>(TIMER_INACTIVE) || rd < 0) {
+            data.test.timer_reboot = -1;
+        } else {
+            data.config.delay_reboot = rd;
+            data.test.timer_reboot = rd;
+        }
+    }
+    
+    // --- Test result ---
+    float test_val = read_usage_value(map, report_cache,
+        HID_USAGE_POW(HID_USAGE_POW_TEST), "ups.test.result");
+    if (!std::isnan(test_val)) {
+        int test_int = static_cast<int>(test_val);
+        switch (test_int) {
+            case 1: data.test.ups_test_result = test::RESULT_DONE_PASSED; break;
+            case 2: data.test.ups_test_result = test::RESULT_DONE_WARNING; break;
+            case 3: data.test.ups_test_result = test::RESULT_DONE_ERROR; break;
+            case 4: data.test.ups_test_result = test::RESULT_ABORTED; break;
+            case 5: data.test.ups_test_result = test::RESULT_IN_PROGRESS; break;
+            case 6: data.test.ups_test_result = test::RESULT_NO_TEST; break;
+        }
+    }
+    if (data.test.ups_test_result.empty()) {
+        data.test.ups_test_result = test::RESULT_NO_TEST;
+    }
+    
+    // --- Warning/low battery thresholds ---
+    float warning_cap = read_usage_value(map, report_cache,
+        HID_USAGE_BAT(HID_USAGE_BAT_WARNING_CAPACITY_LIMIT), "battery.charge.warning");
+    if (!std::isnan(warning_cap)) {
+        data.battery.charge_warning = warning_cap;
+    }
+    
+    // Set USB identification
+    data.device.usb_vendor_id = parent_->get_vendor_id();
+    data.device.usb_product_id = parent_->get_product_id();
+    
+    // Determine success
+    bool success = !std::isnan(data.power.input_voltage) || 
+                   !std::isnan(data.battery.level) || 
+                   !std::isnan(data.power.load_percent);
+    
+    if (success) {
+        ESP_LOGI(TL_TAG, "Data read OK (descriptor): bat=%s%%, in=%sV, out=%sV, load=%s%%, freq=%sHz",
+                 !std::isnan(data.battery.level) ? std::to_string(static_cast<int>(data.battery.level)).c_str() : "?",
+                 !std::isnan(data.power.input_voltage) ? std::to_string(static_cast<int>(data.power.input_voltage)).c_str() : "?",
+                 !std::isnan(data.power.output_voltage) ? std::to_string(static_cast<int>(data.power.output_voltage)).c_str() : "?",
+                 !std::isnan(data.power.load_percent) ? std::to_string(static_cast<int>(data.power.load_percent)).c_str() : "?",
+                 !std::isnan(data.power.frequency) ? std::to_string(static_cast<int>(data.power.frequency)).c_str() : "?");
+    } else {
+        ESP_LOGW(TL_TAG, "Descriptor-based reading produced no usable data, falling back to heuristic");
+        use_descriptor_ = false;
+        determine_scaling_factors();
+        return read_data_heuristic(data);
+    }
+    
+    return success;
+}
+
+
+// ============================================================================
+// Heuristic Data Reading (fallback)
+// ============================================================================
+//
+// When the HID report descriptor is not available, reads ALL reports and
+// classifies values by range (voltage, frequency, percentage, etc.)
+// ============================================================================
+
+bool TrippLiteProtocol::read_data_heuristic(UpsData &data) {
+    ESP_LOGV(TL_TAG, "Reading Tripp Lite HID data (heuristic mode)...");
     
     // Step 1: Read ALL available feature reports
     std::map<uint8_t, HidReport> all_reports;
@@ -1335,20 +1766,26 @@ bool TrippLiteProtocol::read_timer_data(UpsData &data) {
 
 bool TrippLiteProtocol::beeper_enable() {
     ESP_LOGI(TL_TAG, "Enabling beeper");
-    uint8_t data[2] = {HID_USAGE_POW_AUDIBLE_ALARM_CONTROL, 2};  // 2 = enable
-    return write_hid_feature_report(HID_USAGE_POW_AUDIBLE_ALARM_CONTROL, data, 2);
+    uint8_t rid = use_descriptor_ ? find_report_id_for_usage(HID_USAGE_POW(HID_USAGE_POW_AUDIBLE_ALARM_CONTROL)) : 0;
+    if (rid == 0) rid = HID_USAGE_POW_AUDIBLE_ALARM_CONTROL;  // Fallback to usage ID
+    uint8_t data[2] = {rid, 2};  // 2 = enable
+    return write_hid_feature_report(rid, data, 2);
 }
 
 bool TrippLiteProtocol::beeper_disable() {
     ESP_LOGI(TL_TAG, "Disabling beeper");
-    uint8_t data[2] = {HID_USAGE_POW_AUDIBLE_ALARM_CONTROL, 1};  // 1 = disable
-    return write_hid_feature_report(HID_USAGE_POW_AUDIBLE_ALARM_CONTROL, data, 2);
+    uint8_t rid = use_descriptor_ ? find_report_id_for_usage(HID_USAGE_POW(HID_USAGE_POW_AUDIBLE_ALARM_CONTROL)) : 0;
+    if (rid == 0) rid = HID_USAGE_POW_AUDIBLE_ALARM_CONTROL;
+    uint8_t data[2] = {rid, 1};  // 1 = disable
+    return write_hid_feature_report(rid, data, 2);
 }
 
 bool TrippLiteProtocol::beeper_mute() {
     ESP_LOGI(TL_TAG, "Muting beeper");
-    uint8_t data[2] = {HID_USAGE_POW_AUDIBLE_ALARM_CONTROL, 3};  // 3 = mute
-    return write_hid_feature_report(HID_USAGE_POW_AUDIBLE_ALARM_CONTROL, data, 2);
+    uint8_t rid = use_descriptor_ ? find_report_id_for_usage(HID_USAGE_POW(HID_USAGE_POW_AUDIBLE_ALARM_CONTROL)) : 0;
+    if (rid == 0) rid = HID_USAGE_POW_AUDIBLE_ALARM_CONTROL;
+    uint8_t data[2] = {rid, 3};  // 3 = mute
+    return write_hid_feature_report(rid, data, 2);
 }
 
 bool TrippLiteProtocol::beeper_test() {
@@ -1367,20 +1804,26 @@ bool TrippLiteProtocol::beeper_test() {
 
 bool TrippLiteProtocol::start_battery_test_quick() {
     ESP_LOGI(TL_TAG, "Starting quick battery test");
-    uint8_t data[2] = {HID_USAGE_POW_TEST, test::COMMAND_QUICK};
-    return write_hid_feature_report(HID_USAGE_POW_TEST, data, 2);
+    uint8_t rid = use_descriptor_ ? find_report_id_for_usage(HID_USAGE_POW(HID_USAGE_POW_TEST)) : 0;
+    if (rid == 0) rid = HID_USAGE_POW_TEST;
+    uint8_t data[2] = {rid, test::COMMAND_QUICK};
+    return write_hid_feature_report(rid, data, 2);
 }
 
 bool TrippLiteProtocol::start_battery_test_deep() {
     ESP_LOGI(TL_TAG, "Starting deep battery test");
-    uint8_t data[2] = {HID_USAGE_POW_TEST, test::COMMAND_DEEP};
-    return write_hid_feature_report(HID_USAGE_POW_TEST, data, 2);
+    uint8_t rid = use_descriptor_ ? find_report_id_for_usage(HID_USAGE_POW(HID_USAGE_POW_TEST)) : 0;
+    if (rid == 0) rid = HID_USAGE_POW_TEST;
+    uint8_t data[2] = {rid, test::COMMAND_DEEP};
+    return write_hid_feature_report(rid, data, 2);
 }
 
 bool TrippLiteProtocol::stop_battery_test() {
     ESP_LOGI(TL_TAG, "Stopping battery test");
-    uint8_t data[2] = {HID_USAGE_POW_TEST, test::COMMAND_ABORT};
-    return write_hid_feature_report(HID_USAGE_POW_TEST, data, 2);
+    uint8_t rid = use_descriptor_ ? find_report_id_for_usage(HID_USAGE_POW(HID_USAGE_POW_TEST)) : 0;
+    if (rid == 0) rid = HID_USAGE_POW_TEST;
+    uint8_t data[2] = {rid, test::COMMAND_ABORT};
+    return write_hid_feature_report(rid, data, 2);
 }
 
 bool TrippLiteProtocol::start_ups_test() {
@@ -1407,14 +1850,16 @@ bool TrippLiteProtocol::set_shutdown_delay(int seconds) {
         return false;
     }
     
-    // -1 means cancel/stop shutdown
+    uint8_t rid = use_descriptor_ ? find_report_id_for_usage(HID_USAGE_POW(HID_USAGE_POW_DELAY_BEFORE_SHUTDOWN)) : 0;
+    if (rid == 0) rid = HID_USAGE_POW_DELAY_BEFORE_SHUTDOWN;
+    
     uint16_t value = (seconds < 0) ? 0xFFFF : static_cast<uint16_t>(seconds);
     uint8_t data[2] = {
         static_cast<uint8_t>(value & 0xFF),
         static_cast<uint8_t>((value >> 8) & 0xFF)
     };
     
-    return write_hid_feature_report(HID_USAGE_POW_DELAY_BEFORE_SHUTDOWN, data, 2);
+    return write_hid_feature_report(rid, data, 2);
 }
 
 bool TrippLiteProtocol::set_start_delay(int seconds) {
@@ -1425,12 +1870,15 @@ bool TrippLiteProtocol::set_start_delay(int seconds) {
         return false;
     }
     
+    uint8_t rid = use_descriptor_ ? find_report_id_for_usage(HID_USAGE_POW(HID_USAGE_POW_DELAY_BEFORE_STARTUP)) : 0;
+    if (rid == 0) rid = HID_USAGE_POW_DELAY_BEFORE_STARTUP;
+    
     uint8_t data[2] = {
         static_cast<uint8_t>(seconds & 0xFF),
         static_cast<uint8_t>((seconds >> 8) & 0xFF)
     };
     
-    return write_hid_feature_report(HID_USAGE_POW_DELAY_BEFORE_STARTUP, data, 2);
+    return write_hid_feature_report(rid, data, 2);
 }
 
 bool TrippLiteProtocol::set_reboot_delay(int seconds) {
@@ -1441,12 +1889,15 @@ bool TrippLiteProtocol::set_reboot_delay(int seconds) {
         return false;
     }
     
+    uint8_t rid = use_descriptor_ ? find_report_id_for_usage(HID_USAGE_POW(HID_USAGE_POW_DELAY_BEFORE_REBOOT)) : 0;
+    if (rid == 0) rid = HID_USAGE_POW_DELAY_BEFORE_REBOOT;
+    
     uint8_t data[2] = {
         static_cast<uint8_t>(seconds & 0xFF),
         static_cast<uint8_t>((seconds >> 8) & 0xFF)
     };
     
-    return write_hid_feature_report(HID_USAGE_POW_DELAY_BEFORE_REBOOT, data, 2);
+    return write_hid_feature_report(rid, data, 2);
 }
 
 

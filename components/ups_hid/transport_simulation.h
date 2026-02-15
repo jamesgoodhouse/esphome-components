@@ -37,6 +37,8 @@ public:
     esp_err_t get_string_descriptor(uint8_t string_index, 
                                   std::string& result) override;
     
+    esp_err_t get_hid_report_descriptor(std::vector<uint8_t>& descriptor) override;
+    
     std::string get_last_error() const override;
 
 private:

@@ -49,6 +49,7 @@ namespace esphome { namespace text_sensor { class TextSensor; } }
 #include "transport_interface.h"
 #include "protocol_factory.h"
 #include "constants_hid.h"
+#include "hid_report_descriptor.h"
 
 namespace esphome
 {
@@ -178,6 +179,7 @@ namespace esphome
       // Clean architecture members
       std::unique_ptr<IUsbTransport> transport_;
       std::unique_ptr<UpsProtocolBase> active_protocol_;
+      std::unique_ptr<HidReportMap> report_map_;
       
       // Sensor storage (conditional on platform availability)
 #ifdef USE_SENSOR      
@@ -215,6 +217,11 @@ namespace esphome
                              const uint8_t* data, size_t data_len,
                              uint32_t timeout_ms = 1000);
       esp_err_t get_string_descriptor(uint8_t string_index, std::string& result);
+      esp_err_t get_hid_report_descriptor(std::vector<uint8_t>& descriptor);
+      
+      // Parsed HID report map (populated after descriptor fetch)
+      const HidReportMap* get_report_map() const { return report_map_ ? report_map_.get() : nullptr; }
+      bool fetch_and_parse_report_descriptor();
       
       // Transport information
       bool is_connected() const;

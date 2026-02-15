@@ -22,6 +22,7 @@ struct BatteryData {
   std::string status{};                // Battery status text
   std::string type{};                  // Battery chemistry type
   std::string mfr_date{};              // Battery manufacture date
+  bool needs_replacement{false};       // Battery replacement needed flag
   
   // Validation and utility methods
   bool is_valid() const { 

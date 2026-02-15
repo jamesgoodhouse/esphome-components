@@ -15,6 +15,9 @@ struct PowerData {
   float input_transfer_high{NAN};      // High transfer voltage threshold (V)
   float frequency{NAN};                // Input frequency (Hz)
   
+  // Input frequency nominal
+  float input_frequency_nominal{NAN};  // Nominal input frequency (Hz)
+  
   // Output power metrics
   float output_voltage{NAN};           // Current output voltage (V)
   float output_voltage_nominal{NAN};   // Nominal output voltage (V)

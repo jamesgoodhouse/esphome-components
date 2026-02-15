@@ -71,6 +71,7 @@ void UpsHidComponent::update() {
     if (consecutive_failures_ > max_consecutive_failures_) {
       ESP_LOGW(TAG, log_messages::RESETTING_PROTOCOL);
       active_protocol_.reset();  // Force protocol re-detection on next update
+      report_map_.reset();       // Re-fetch descriptor on re-detection
       consecutive_failures_ = 0;
     }
   }
@@ -136,6 +137,53 @@ esp_err_t UpsHidComponent::get_string_descriptor(uint8_t string_index, std::stri
     return ESP_ERR_INVALID_STATE;
   }
   return transport_->get_string_descriptor(string_index, result);
+}
+
+esp_err_t UpsHidComponent::get_hid_report_descriptor(std::vector<uint8_t>& descriptor) {
+  if (!transport_) {
+    return ESP_ERR_INVALID_STATE;
+  }
+  return transport_->get_hid_report_descriptor(descriptor);
+}
+
+bool UpsHidComponent::fetch_and_parse_report_descriptor() {
+  std::vector<uint8_t> raw_descriptor;
+  esp_err_t ret = get_hid_report_descriptor(raw_descriptor);
+  if (ret != ESP_OK || raw_descriptor.empty()) {
+    ESP_LOGW(TAG, "Failed to fetch HID report descriptor: %s",
+             ret != ESP_OK ? esp_err_to_name(ret) : "empty descriptor");
+    return false;
+  }
+  
+  ESP_LOGI(TAG, "Fetched HID report descriptor: %zu bytes", raw_descriptor.size());
+  
+  // Log raw descriptor bytes for debugging
+  std::string hex_dump;
+  for (size_t i = 0; i < raw_descriptor.size() && i < 128; i++) {
+    char buf[4];
+    snprintf(buf, sizeof(buf), "%02X ", raw_descriptor[i]);
+    hex_dump += buf;
+    if ((i + 1) % 16 == 0) {
+      ESP_LOGD(TAG, "  Descriptor[%03zu]: %s", i - 15, hex_dump.c_str());
+      hex_dump.clear();
+    }
+  }
+  if (!hex_dump.empty()) {
+    ESP_LOGD(TAG, "  Descriptor[...]: %s", hex_dump.c_str());
+  }
+  if (raw_descriptor.size() > 128) {
+    ESP_LOGD(TAG, "  ... (%zu more bytes)", raw_descriptor.size() - 128);
+  }
+  
+  report_map_ = std::make_unique<HidReportMap>();
+  if (!report_map_->parse(raw_descriptor.data(), raw_descriptor.size())) {
+    ESP_LOGW(TAG, "Failed to parse HID report descriptor");
+    report_map_.reset();
+    return false;
+  }
+  
+  report_map_->dump(TAG);
+  return true;
 }
 
 bool UpsHidComponent::is_connected() const {
@@ -206,6 +254,16 @@ bool UpsHidComponent::detect_protocol() {
   }
   
   ESP_LOGI(TAG, "Successfully created protocol: %s", active_protocol_->get_protocol_name().c_str());
+  
+  // Fetch and parse the HID report descriptor before protocol initialization
+  // This makes the parsed descriptor available to protocols during initialize()
+  if (!report_map_) {
+    if (fetch_and_parse_report_descriptor()) {
+      ESP_LOGI(TAG, "HID report descriptor parsed successfully");
+    } else {
+      ESP_LOGW(TAG, "Could not parse HID report descriptor - protocol will use fallback methods");
+    }
+  }
   
   // Initialize the protocol (detection already done by factory)
   if (!active_protocol_->initialize()) {
@@ -599,6 +657,7 @@ void UpsHidComponent::cleanup() {
   }
   
   active_protocol_.reset();
+  report_map_.reset();
   connected_ = false;
   
   ESP_LOGD(TAG, "Component cleanup completed");

@@ -206,6 +206,14 @@ esp_err_t SimulatedTransport::get_string_descriptor(uint8_t string_index,
     return ESP_OK;
 }
 
+esp_err_t SimulatedTransport::get_hid_report_descriptor(std::vector<uint8_t>& descriptor) {
+    // Simulation mode: return an empty descriptor (no real device)
+    // The protocol will fall back to heuristic mode
+    descriptor.clear();
+    ESP_LOGD(SIM_TRANSPORT_TAG, "Simulated transport: no HID report descriptor available");
+    return ESP_ERR_NOT_SUPPORTED;
+}
+
 std::string SimulatedTransport::get_last_error() const {
     return last_error_;
 }
