@@ -15,6 +15,10 @@ AUTO_LOAD = ["switch", "number", "text_sensor"]
 ups_status_led_ns = cg.esphome_ns.namespace("ups_status_led")
 UpsStatusLedComponent = ups_status_led_ns.class_("UpsStatusLedComponent", cg.Component)
 
+# Import ups_hid namespace for proper type reference
+ups_hid_ns = cg.esphome_ns.namespace("ups_hid")
+UpsHidComponent = ups_hid_ns.class_("UpsHidComponent", cg.PollingComponent)
+
 BatteryColorMode = ups_status_led_ns.enum("BatteryColorMode", is_class=True)
 BATTERY_COLOR_MODES = {
     "discrete": BatteryColorMode.DISCRETE,
@@ -57,7 +61,7 @@ NIGHT_MODE_SCHEMA = cv.Schema({
 
 CONFIG_SCHEMA = cv.Schema({
     cv.GenerateID(): cv.declare_id(UpsStatusLedComponent),
-    cv.Required(CONF_UPS_HID_ID): cv.use_id("ups_hid.UpsHidComponent"),
+    cv.Required(CONF_UPS_HID_ID): cv.use_id(UpsHidComponent),
     cv.Required(CONF_LIGHT_ID): cv.use_id(light.LightState),
     cv.Optional(CONF_TIME_ID): cv.use_id(time.RealTimeClock),
     
