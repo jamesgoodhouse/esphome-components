@@ -24,13 +24,13 @@ Complete UPS monitoring with automatic LED status indication:
 - **Hardware Flexible**: Compatible with any ESPHome light component
 
 #### `essential_sensors.yaml` / `essential_sensors_grouped.yaml`
-Core monitoring sensors (5 sensors) available on all protocols:
-- **Sensors**: `battery_level`, `input_voltage`, `output_voltage`, `load_percent`, `runtime`  
-- **Text Sensors**: `manufacturer`, `model`
-- **Binary Sensors**: `charging`, `overload`
+Core monitoring sensors available on all protocols:
+- **Sensors (5)**: `battery_level`, `input_voltage`, `output_voltage`, `load_percent`, `runtime`
+- **Text Sensors (2)**: `manufacturer`, `model`
+- **Binary Sensors (10)**: `charging`, `overload`, `discharging`, `boost`, `buck`, `over_temperature`, `communication_lost`, `shutdown_imminent`, `awaiting_power`, `voltage_out_of_range`
 - **System Monitoring**: uptime, WiFi signal, IP address, ESPHome version
 - **Grouped version** organizes entities into logical sections in ESPHome web interface
-- Compatible with APC, CyberPower, and Generic protocols
+- Compatible with APC, CyberPower, Tripp Lite, and Generic protocols
 
 ### **Optional Enhancement Packages**
 
@@ -63,25 +63,28 @@ Automatic LED status indication using smart patterns:
 
 **Uses Data Provider Pattern**: No sensor entities required - accesses UPS data directly via `id(ups_monitor).is_online()`, etc.
 
-#### `extended_sensors.yaml` / `extended_sensors_grouped.yaml` 
-Advanced monitoring (17 additional sensors) for feature-rich devices:
+#### `extended_sensors.yaml` / `extended_sensors_grouped.yaml`
+Advanced monitoring (17 additional numeric sensors + 9 text sensors) for feature-rich devices:
 
 **Enhanced Voltage Monitoring**:
 - `battery_voltage`, `battery_voltage_nominal`, `input_voltage_nominal`
 - `input_transfer_low`, `input_transfer_high`, `frequency`
 
+**Live Power Measurements**:
+- `output_current`, `active_power`, `output_frequency`
+
+**Battery Capacity Details**:
+- `battery_config_voltage`, `battery_full_charge_capacity`, `battery_design_capacity`
+
 **Power & Configuration**:
 - `ups_realpower_nominal`, `ups_delay_shutdown`, `ups_delay_start`, `ups_delay_reboot`
-
-**Dynamic Timer Monitoring** (negative values = no active countdown):
-- `ups_timer_shutdown`, `ups_timer_start`, `ups_timer_reboot`
 - `battery_runtime_low`
 
 **Extended Device Information**:
 - `serial_number`, `firmware_version`, `ups_beeper_status`, `input_sensitivity`
-- `ups_mfr_date`, `battery_status`, `ups_firmware_aux`
+- `ups_mfr_date`, `battery_mfr_date`, `battery_type`, `battery_status`, `ups_firmware_aux`
 
-**Smart Template**: Calculated load power using HID nominal power when available
+**Smart Template**: Calculated load power using HID nominal power when available (falls back to estimate if `active_power` not available)
 **Grouped version** categorizes sensors by function (Battery, Voltage, Load, Configuration, Device Info)
 
 #### `ups_controls.yaml` / `ups_controls_grouped.yaml`
@@ -112,10 +115,12 @@ UPS delay configuration package (3 number entities + automation scripts):
 Network UPS Tools (NUT) TCP server for standard protocol integration:
 
 **Server Features**:
-- **Standard NUT Protocol**: v1.3 compliant TCP server on port 3493
-- **Authentication**: Optional username/password protection
-- **Multi-client Support**: Up to 4 simultaneous connections
+- **Standard NUT Protocol**: v2.8.0 compliant TCP server on port 3493
+- **Authentication**: Optional username/password; read-only commands work without auth
+- **Multi-client Support**: Up to 8 simultaneous connections (configurable to 20)
 - **Dynamic UPS Discovery**: Automatically exposes connected UPS data
+- **TCP Keepalive**: Detects dead connections automatically
+- **Send Timeout**: 3-second timeout prevents slow clients from blocking the server
 
 **Protocol Support**:
 - `LIST UPS` - Available UPS devices with dynamic description
@@ -173,32 +178,31 @@ CyberPower CP1500 series optimizations:
 
 ### **Package Composition Options:**
 
-| Configuration Level | Packages Included | Total Sensors | Use Case |
+| Configuration Level | Packages Included | Total Entities | Use Case |
 |-------------------|------------------|--------------|----------|
-| **Minimal** | `base_ups` + `essential_sensors` | **9 sensors** | Basic monitoring |
-| **Complete** | + `extended_sensors` + `ups_controls` + `timer_sensors` | **32 sensors + 10 controls** | Full featured |
-| **Complete + Config** | + `delay_config` | **32 sensors + 10 controls + 3 number entities** | With UPS configuration |
-| **Complete + NUT Server** | + `nut_server` | **32 sensors + 10 controls + TCP server** | Network monitoring integration |
-| **Device-Optimized** | + device-specific package | **33+ sensors + 13+ controls** | Production ready |
-| **Organized Interface** | Use `*_grouped.yaml` + `entity_groups.yaml` | **Same sensors, better layout** | Enhanced web interface |
+| **Minimal** | `base_ups` + `essential_sensors` | **5 sensors + 2 text + 10 binary + system** | Basic monitoring |
+| **Complete** | + `extended_sensors` + `ups_controls` + `timer_sensors` | **27 sensors + 13 text + 10 binary + 10 controls** | Full featured |
+| **Complete + Config** | + `delay_config` | **+ 3 number entities** | With UPS configuration |
+| **Complete + NUT Server** | + `nut_server` | **+ TCP server** | Network monitoring integration |
+| **Device-Optimized** | + device-specific package | **+ device-specific additions** | Production ready |
+| **Organized Interface** | Use `*_grouped.yaml` + `entity_groups.yaml` | **Same entities, better layout** | Enhanced web interface |
 
 ### **Sensor Breakdown by Type:**
 
 #### **Numeric Sensors** (27 total available):
 - **Essential (5)**: battery_level, input_voltage, output_voltage, load_percent, runtime
-- **Extended (17)**: Enhanced voltage/power/configuration/threshold monitoring
+- **Extended (17)**: battery_voltage, battery_voltage_nominal, battery_config_voltage, battery_full_charge_capacity, battery_design_capacity, input_voltage_nominal, input_transfer_low, input_transfer_high, frequency, output_current, active_power, output_frequency, ups_realpower_nominal, ups_delay_shutdown, ups_delay_start, ups_delay_reboot, battery_runtime_low + calculated load power template
 - **Timer (5)**: ups_timer_shutdown, ups_timer_start, ups_timer_reboot, active_timer_count, fast_polling_status
 
-#### **Text Sensors** (10 total available):
+#### **Text Sensors** (14 total available):
 - **Base (2)**: status, protocol *(in base_ups.yaml)*
-- **Essential (2)**: manufacturer, model  
-- **Extended (6)**: serial_number, firmware_version, ups_beeper_status, input_sensitivity, ups_mfr_date, battery_status, ups_firmware_aux
+- **Essential (2)**: manufacturer, model
+- **Extended (9)**: serial_number, firmware_version, ups_beeper_status, input_sensitivity, ups_mfr_date, battery_mfr_date, battery_type, battery_status, ups_firmware_aux
 - **Controls (1)**: ups_test_result *(in ups_controls.yaml)*
-- **Device-Specific (+1)**: battery_mfr_date *(CyberPower only)*
 
-#### **Binary Sensors** (6 total):
-- **Base (4)**: online, on_battery, low_battery, fault  
-- **Essential (2)**: charging, overload
+#### **Binary Sensors** (10 in config packages, 15 types available):
+- **Essential (10)**: charging, overload, discharging, boost, buck, over_temperature, communication_lost, shutdown_imminent, awaiting_power, voltage_out_of_range
+- **Additional types** (available in platform, add to your own config): online, on_battery, low_battery, fault, fully_discharged
 
 #### **Button Controls** (10 total, all in ups_controls.yaml):
 - **Beeper (4)**: enable, disable, mute, test

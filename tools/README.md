@@ -100,22 +100,29 @@ Comprehensive test script for validating the NUT server component functionality.
 
 ## Protocol Development
 
-The UPS HID component uses a modern self-registering protocol system. New protocols automatically register themselves using macros:
+The UPS HID component uses an explicit protocol registration system in `protocol_factory.cpp`. Protocols are registered during factory initialization to ensure reliable availability on ESP32 (static self-registration via global constructors can be unreliable when the linker strips translation units).
 
 ### Adding New Vendor-Specific Protocols
 
 1. Create a new protocol class inheriting from `UpsProtocolBase`
 2. Implement required methods: `detect()`, `initialize()`, `read_data()`
-3. Register the protocol using the registration macro:
+3. Create a factory function (e.g., `create_my_protocol`) that returns a `std::unique_ptr<UpsProtocolBase>`
+4. Register the protocol explicitly in `protocol_factory.cpp` `ensure_initialized()`:
 
    ```cpp
-   // At the end of your protocol .cpp file
-   REGISTER_UPS_PROTOCOL_FOR_VENDOR(0x1234, my_protocol, 
-       esphome::ups_hid::create_my_protocol, 
-       "My Protocol Name", 
-       "Description of my protocol", 
-       100);  // Priority
+   // In protocol_factory.cpp ensure_initialized()
+   if (vendor_reg.find(MY_VENDOR_ID) == vendor_reg.end()) {
+       ProtocolInfo my_info;
+       my_info.creator = create_my_protocol;
+       my_info.name = "My Protocol Name";
+       my_info.description = "Description of my protocol";
+       my_info.supported_vendors = {MY_VENDOR_ID};
+       my_info.priority = 100;
+       vendor_reg[MY_VENDOR_ID].push_back(my_info);
+   }
    ```
+
+5. Add the `#include` for your protocol header at the top of `protocol_factory.cpp`
 
 ### Universal Compatibility
 

@@ -4,13 +4,15 @@ The `nut_server` component exposes UPS data from the `ups_hid` component via the
 
 ## Features
 
-- **Multi-client TCP Server**: Supports up to 10 simultaneous client connections (configurable)
+- **Multi-client TCP Server**: Up to 8 simultaneous connections (configurable to 20)
 - **NUT Protocol v2.8.0**: Compatible with standard NUT clients and monitoring tools
-- **Authentication**: Optional username/password authentication for secure access
+- **Authentication**: Optional username/password; read-only commands (LIST, GET) work without auth per NUT spec
 - **Real-time UPS Data**: Exposes live UPS status from the `ups_hid` component
 - **Command Support**: Execute UPS commands like beeper control and battery tests
-- **Thread-safe Design**: Proper mutex protection for concurrent client access
-- **Non-blocking I/O**: Efficient event-driven architecture using FreeRTOS tasks
+- **Thread-safe Design**: Dedicated FreeRTOS server task with mutex-protected client access
+- **Non-blocking I/O**: Efficient event-driven architecture with send timeouts
+- **TCP Keepalive**: Detects dead connections within ~25 seconds (10s idle + 3x5s probes)
+- **Robust Send Handling**: 3-second send timeout prevents slow clients from blocking the server
 
 ## Configuration
 
@@ -74,16 +76,16 @@ wifi:
 | `VERSION` | Get NUT protocol version | No |
 | `NETVER` | Get network protocol version | No |
 | `UPSDVER` | Get server version | No |
-| `LIST UPS` | List available UPS devices | Yes* |
-| `LIST VAR <ups>` | List all variables for UPS | Yes* |
-| `GET VAR <ups> <var>` | Get specific variable value | Yes* |
-| `LIST CMD <ups>` | List available commands | Yes* |
-| `LIST CLIENTS` | List connected clients | Yes* |
-| `LIST RW <ups>` | List read-write variables | Yes* |
-| `LIST ENUM <ups> <var>` | List enum values for variable | Yes* |
-| `LIST RANGE <ups> <var>` | List range for variable | Yes* |
+| `LIST UPS` | List available UPS devices | No |
+| `LIST VAR <ups>` | List all variables for UPS | No |
+| `GET VAR <ups> <var>` | Get specific variable value | No |
+| `LIST CMD <ups>` | List available commands | No |
+| `LIST CLIENTS` | List connected clients | No |
+| `LIST RW <ups>` | List read-write variables | No |
+| `LIST ENUM <ups> <var>` | List enum values for variable | No |
+| `LIST RANGE <ups> <var>` | List range for variable | No |
 
-*Authentication required only if password is configured
+Read-only commands (LIST, GET) do not require authentication per the NUT protocol specification. Only write commands (SET, INSTCMD, FSD) require authentication when a password is configured.
 
 ### Control Commands
 
@@ -111,27 +113,44 @@ The following NUT variables are exposed based on available UPS data:
 ### Device Information
 - `ups.mfr` - Manufacturer name
 - `ups.model` - UPS model
-- `ups.serial` - Serial number
+- `ups.serial` / `device.serial` - Serial number
 - `ups.firmware` - Firmware version
+- `driver.name` - Driver name (`usbhid-ups`)
+- `driver.version` - Driver version
+- `driver.version.internal` - Internal driver version
 
 ### Battery Status
 - `battery.charge` - Battery charge percentage (0-100)
+- `battery.charge.low` - Low battery threshold
+- `battery.charge.warning` - Warning battery threshold
 - `battery.voltage` - Battery voltage
+- `battery.voltage.nominal` - Nominal battery voltage
 - `battery.runtime` - Estimated runtime in seconds
 - `battery.type` - Battery chemistry type
 
 ### Power Status
 - `input.voltage` - Input voltage from mains
+- `input.voltage.nominal` - Nominal input voltage
+- `input.frequency` - Input frequency
 - `output.voltage` - Output voltage to load
+- `output.current` - Output current in amps
 - `ups.load` - Load percentage (0-100)
 - `ups.power` - Output power in watts
+- `ups.realpower.nominal` - Nominal real power
 - `ups.status` - Combined status flags:
   - `OL` - Online (mains power present)
   - `OB` - On Battery
   - `LB` - Low Battery
+  - `FSD` - Forced Shutdown (shutdown imminent)
+  - `OFF` - Awaiting power
+  - `RB` - Replace Battery
   - `CHRG` - Charging
+  - `TRIM` - AVR trim active
+  - `BOOST` - AVR boost active
+  - `OVER` - Overloaded
   - `TEST` - Test in progress
   - `ALARM` - Alarm condition
+- `ups.test.result` - Last test result
 
 ### Configuration
 - `ups.delay.shutdown` - Shutdown delay in seconds
@@ -289,9 +308,14 @@ The NUT server component follows several design patterns for robustness:
    - Verify UPS is supported by `ups_hid`
 
 4. **Client Timeout**
-   - Clients are disconnected after 60 seconds of inactivity
+   - Clients are disconnected after 30 seconds of inactivity
+   - TCP keepalive detects dead connections within ~25 seconds
    - Send periodic queries to maintain connection
-   - Increase client timeout if needed (requires code modification)
+
+5. **Slow Client / Send Timeout**
+   - If a client cannot receive data within 3 seconds, it is disconnected
+   - This prevents slow clients from blocking the server for other connections
+   - Check network connectivity if clients are being unexpectedly dropped
 
 ### Debug Logging
 
@@ -330,7 +354,6 @@ Planned improvements for future versions:
 - [ ] Support for SET VAR (configure UPS settings)
 - [ ] Event notifications (NOTIFY)
 - [ ] Multiple UPS support (when multiple `ups_hid` components exist)
-- [ ] Configurable client timeout
 - [ ] Rate limiting for failed authentication attempts
 
 ## References

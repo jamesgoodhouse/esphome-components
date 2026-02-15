@@ -1,16 +1,17 @@
 # UPS HID Component for ESPHome
 
-A ESPHome component for monitoring UPS devices via USB connection on ESP32-S3. Direct USB HID communication with support for APC, CyberPower, and generic HID UPS devices.
+An ESPHome component for monitoring UPS devices via USB connection on ESP32-S3. Direct USB HID communication with support for APC, CyberPower, Tripp Lite, and generic HID UPS devices.
 
 ## Features
 
-- 🔋 **Real-time UPS monitoring**: Battery level, voltages, load, runtime, status
+- 🔋 **Real-time UPS monitoring**: Battery level, voltages, load, runtime, current, active power, and status
+- 🔍 **HID report descriptor parser**: Automatic field discovery and scaling from USB HID descriptors
 - 🧪 **UPS self-test control**: Battery tests (quick/deep), panel tests, with real-time result monitoring
 - 🔊 **Beeper control**: Enable/disable/mute/test UPS audible alarms via HID write operations
 - ⏱️ **Delay configuration**: Configure UPS shutdown, start, and reboot delays via USB HID
 - 🌈 **Visual status indicator**: RGB LED with customizable status colors
 - 🏠 **Home Assistant integration**: Automatic entity discovery via ESPHome API
-- 🔌 **Multi-protocol support**: APC HID, CyberPower HID, Generic HID
+- 🔌 **Multi-protocol support**: APC HID, CyberPower HID, Tripp Lite HID, Generic HID
 - 🎯 **Auto-detection**: Intelligent protocol detection based on USB vendor IDs
 - 🔧 **Robust USB handling**: ESP-IDF v5.4 compatible with 3-tier reconnection recovery
 - 🧪 **Simulation mode**: Test integration without physical UPS device
@@ -28,7 +29,7 @@ A ESPHome component for monitoring UPS devices via USB connection on ESP32-S3. D
 ```yaml
 # Quick start example - see configs/README.md for complete modular configurations
 external_components:
-  - source: github://bullshit/esphome-components
+  - source: github://jamesgoodhouse/esphome-components
     components: [ ups_hid ]  # Add more components as needed
 
 # Use modular configuration packages for maintainable setup
@@ -68,7 +69,7 @@ UPS USB Port (Type-B)  ←→  USB Cable  ←→  ESP32-S3 USB OTG Port
 |--------|--------|----------|-----------|----------------|
 | **APC** | Back-UPS ES Series, Smart-UPS | APC HID | 0x051D | ✅ Confirmed |
 | **CyberPower** | CP1500EPFCLCD, CP1000PFCLCD | CyberPower HID | 0x0764 | ✅ Confirmed |
-| **Tripp Lite** | SMART1500LCDT, UPS series | Generic HID | 0x09AE | ⚠️ Limited |
+| **Tripp Lite** | ECO850LCD (PID 0x3024), SMART1500LCDT | Tripp Lite HID | 0x09AE | ✅ Confirmed |
 | **Eaton/MGE** | Ellipse, Evolution series | Generic HID | 0x06DA | ⚠️ Limited |
 | **Belkin** | Older USB UPS models | Generic HID | 0x050D | ⚠️ Limited |
 
@@ -82,7 +83,17 @@ UPS USB Port (Type-B)  ←→  USB Cable  ←→  ESP32-S3 USB OTG Port
 |----------|---------------|----------------|---------------|----------------|
 | **APC HID** | USB HID reports | ✅ | Battery, voltage, status | ✅ Beeper control |
 | **CyberPower HID** | Vendor-specific HID | ✅ | Extended sensors, config | ✅ Beeper control |
+| **Tripp Lite HID** | HID + vendor page 0xFFFF | ✅ | Full monitoring, current, active power | ✅ Beeper control |
 | **Generic HID** | Standard HID-PDC | ✅ | Basic monitoring | ⚠️ Limited writes |
+
+#### Tripp Lite Protocol Details
+
+The Tripp Lite protocol uses a dedicated HID report descriptor parser to automatically discover fields and their scaling. Key features:
+
+- **Vendor-specific usage page (0xFFFF)**: Decodes proprietary Tripp Lite HID usages for flow control, power, and status
+- **Page-confusion fallback**: Handles Tripp Lite firmware quirks where vendor-specific usages appear on the standard Power Device page
+- **Descriptor-driven scaling**: Raw values are scaled using device-reported unit exponents (e.g., voltage exponent -1 for 0.1V resolution)
+- **Tested on**: ECO850LCD (PID 0x3024) -- known quirks documented and handled
 
 ## Configuration Reference
 
@@ -90,9 +101,9 @@ UPS USB Port (Type-B)  ←→  USB Cable  ←→  ESP32-S3 USB OTG Port
 
 | Sensor Package | Count | Description |
 |----------------|-------|-------------|
-| **Essential Monitoring** | 7 sensors | Basic UPS monitoring (battery, voltage, load, status) |
-| **Extended Features** | 17+ sensors | Advanced metrics (timers, thresholds, device info) |
-| **Status Indicators** | 6 binary sensors | Online, battery, fault, charging states |
+| **Numeric Sensors** | 27 types | Battery, voltage, load, runtime, current, power, frequency, thresholds, timers |
+| **Binary Sensors** | 15 types | Online, battery, fault, charging, boost/buck, temperature, shutdown states |
+| **Text Sensors** | 14 types | Manufacturer, model, status, serial, firmware, battery info |
 | **Device Controls** | 10 buttons | Beeper control, battery/panel testing |
 | **Configuration** | 3 number entities | UPS delay settings (shutdown/start/reboot) |
 
@@ -108,11 +119,11 @@ ups_hid:
 
 ### Platform Types
 
-**Sensor Platform**: `battery_level`, `input_voltage`, `output_voltage`, `load_percent`, `runtime`, `frequency` + extended sensors
+**Sensor Platform**: `battery_level`, `input_voltage`, `output_voltage`, `load_percent`, `runtime`, `frequency`, `output_current`, `output_frequency`, `active_power`, `battery_voltage`, `battery_voltage_nominal`, `battery_config_voltage`, `battery_full_charge_capacity`, `battery_design_capacity`, `battery_charge_low`, `battery_charge_warning`, `battery_runtime_low`, `input_voltage_nominal`, `input_transfer_low`, `input_transfer_high`, `ups_realpower_nominal`, `ups_delay_shutdown`, `ups_delay_start`, `ups_delay_reboot`, `ups_timer_shutdown`, `ups_timer_start`, `ups_timer_reboot`
 
-**Binary Sensor Platform**: `online`, `on_battery`, `low_battery`, `charging`, `fault`, `overload`
+**Binary Sensor Platform**: `online`, `on_battery`, `low_battery`, `charging`, `discharging`, `fully_discharged`, `fault`, `overload`, `boost`, `buck`, `over_temperature`, `communication_lost`, `shutdown_imminent`, `awaiting_power`, `voltage_out_of_range`
 
-**Text Sensor Platform**: `manufacturer`, `model`, `status`, `protocol`, `serial_number`, `firmware_version`
+**Text Sensor Platform**: `manufacturer`, `model`, `status`, `protocol`, `serial_number`, `firmware_version`, `ups_beeper_status`, `input_sensitivity`, `battery_status`, `battery_type`, `battery_mfr_date`, `ups_mfr_date`, `ups_firmware_aux`, `ups_test_result`
 
 **Button Platform**: Beeper control (`enable`, `disable`, `mute`, `test`) + UPS testing (`battery_quick`, `battery_deep`, `ups_test`)
 
@@ -130,7 +141,8 @@ You can now manually select which UPS protocol to use instead of relying on auto
 ups_hid:
   protocol: auto                 # Default: automatic selection based on USB vendor ID
   # protocol: apc                # Force APC HID protocol
-  # protocol: cyberpower         # Force CyberPower HID protocol  
+  # protocol: cyberpower         # Force CyberPower HID protocol
+  # protocol: tripplite          # Force Tripp Lite HID protocol
   # protocol: generic            # Force Generic HID protocol
 ```
 
@@ -139,6 +151,7 @@ ups_hid:
 - **`auto`** (default): Automatically select protocol based on USB vendor ID
   - APC devices (0x051D): Uses APC HID Protocol
   - CyberPower (0x0764): Uses CyberPower HID Protocol
+  - Tripp Lite (0x09AE): Uses Tripp Lite HID Protocol
   - Unknown devices: Falls back to Generic HID Protocol
 
 - **`apc`**: Force APC HID Protocol
@@ -150,6 +163,13 @@ ups_hid:
   - Use for CyberPower CP series devices
   - Enhanced sensor support with 12+ additional sensors
   - Runtime scaling and advanced thresholds
+
+- **`tripplite`**: Force Tripp Lite HID Protocol
+  - Use for Tripp Lite UPS devices (ECO, SMART, AVR series)
+  - HID report descriptor-driven field discovery and scaling
+  - Vendor-specific usage page (0xFFFF) decoding
+  - Current, active power, and boost/buck status reporting
+  - Page-confusion fallback for firmware quirks
 
 - **`generic`**: Force Generic HID Protocol
   - Universal fallback for unknown UPS brands
@@ -246,4 +266,6 @@ A: Yes, beeper settings are stored in UPS NVRAM and persist across reboots.
 
 ## Development
 
-Use `simulation_mode: true` for testing without UPS hardware. For custom protocols, inherit from `UpsProtocolBase` and implement required methods.
+Use `simulation_mode: true` for testing without UPS hardware. For custom protocols, inherit from `UpsProtocolBase`, implement required methods, and register the protocol in `protocol_factory.cpp`.
+
+See [`tools/README.md`](../../tools/README.md) for protocol development guidance and debug data collection tools.

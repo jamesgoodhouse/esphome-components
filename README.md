@@ -6,11 +6,12 @@ A collection of ESPHome components for various hardware integrations and monitor
 
 ### 🔋 UPS HID Component (`ups_hid`)
 
-Monitor UPS devices via direct USB connection on ESP32-S3. Supports APC, CyberPower, and generic HID UPS devices with real-time monitoring of battery status, power conditions, and device information.
+Monitor UPS devices via direct USB connection on ESP32-S3. Supports APC, CyberPower, Tripp Lite, and generic HID UPS devices with real-time monitoring of battery status, power conditions, and device information.
 
 **Key Features:**
-- **Real-time UPS monitoring**: Battery, voltage, load, runtime, and 15+ sensors
-- **Multi-protocol support**: APC HID, CyberPower HID, Generic HID with auto-detection
+- **Real-time UPS monitoring**: Battery, voltage, load, runtime, current, active power, and 25+ sensors
+- **Multi-protocol support**: APC HID, CyberPower HID, Tripp Lite HID, Generic HID with auto-detection
+- **HID report descriptor parser**: Automatic field discovery from USB HID descriptors
 - **UPS Control**: Beeper control (enable/disable/mute/test) and battery testing
 - ⏱️ **Delay configuration**: Configure UPS shutdown, start, and reboot delays via USB HID
 - **Home Assistant integration**: Full device discovery and management
@@ -33,11 +34,11 @@ Smart LED status indicator for UPS monitoring with automatic pattern management 
 
 ### 🌐 NUT Server Component (`nut_server`)
 
-Network UPS Tools (NUT) protocol TCP server for exposing UPS data to standard monitoring tools. Provides NUT v1.3 compliant server for integration with existing infrastructure.
+Network UPS Tools (NUT) protocol TCP server for exposing UPS data to standard monitoring tools. Provides NUT v2.8.0 compliant server for integration with existing infrastructure.
 
 **Key Features:**
-- **Standard NUT Protocol**: v1.3 compliant TCP server on port 3493
-- **Multi-client support**: Up to 4 simultaneous monitoring connections
+- **Standard NUT Protocol**: v2.8.0 compliant TCP server on port 3493
+- **Multi-client support**: Up to 8 simultaneous connections (configurable to 20)
 - **Full protocol implementation**: LIST UPS/VAR/CMD/CLIENT, INSTCMD, NETVER
 - **Dynamic UPS detection**: Automatically exposes connected UPS manufacturer/model
 - **Authentication support**: Optional username/password protection
@@ -52,7 +53,7 @@ Modular, maintainable ESPHome configuration system using packages. Build configu
 **Key Features:**
 - **Modular packages**: Core, sensors, controls, device-specific optimizations
 - **Grouped organization**: Optional entity grouping for cleaner web interface
-- **Example configurations**: Production-ready configs for APC, CyberPower, and rack UPS
+- **Example configurations**: Production-ready configs for APC, CyberPower, Tripp Lite, and rack UPS
 - **Regional defaults**: Voltage/frequency presets for different regions
 - **Smart LED integration**: Automatic visual status indication
 
