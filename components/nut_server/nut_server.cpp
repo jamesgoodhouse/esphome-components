@@ -60,8 +60,10 @@ void NutServerComponent::dump_config() {
   ESP_LOGCONFIG(TAG, "  Port: %d", port_);
   ESP_LOGCONFIG(TAG, "  Max Clients: %d", max_clients_);
   ESP_LOGCONFIG(TAG, "  UPS Name: %s", get_ups_name().c_str());
-  ESP_LOGCONFIG(TAG, "  Username: %s", username_.c_str());
-  ESP_LOGCONFIG(TAG, "  Authentication: %s", password_.empty() ? "Disabled" : "Enabled");
+  ESP_LOGCONFIG(TAG, "  Authentication: %s", auth_enabled() ? "Enabled" : "Disabled");
+  for (const auto &user : users_) {
+    ESP_LOGCONFIG(TAG, "    User: %s", user.username.c_str());
+  }
 
   if (ups_hid_) {
     ESP_LOGCONFIG(TAG, "  UPS HID Component: Connected");
@@ -403,7 +405,7 @@ void NutServerComponent::process_command(NutClient &client, const std::string &c
     handle_legacy_list_vars(client, cmd);
   }
   // Write commands: SET, INSTCMD, FSD require authentication
-  else if (!password_.empty() && !client.is_authenticated()) {
+  else if (auth_enabled() && !client.is_authenticated()) {
     send_error(client, "ACCESS-DENIED");
   } else if (cmd == "SET") {
     size_t sub_pos = args.find(' ');
@@ -451,8 +453,8 @@ void NutServerComponent::handle_login(NutClient &client, const std::string &args
   // Standard NUT protocol: LOGIN <upsname> (1 argument)
   // Authentication should have been done via USERNAME + PASSWORD commands
   if (parts.size() == 1) {
-    // If no password is configured, allow login without authentication
-    if (password_.empty()) {
+    // If no authentication is configured, allow login without credentials
+    if (!auth_enabled()) {
       client.state = ClientState::AUTHENTICATED;
       send_response(client, "OK\n");
       ESP_LOGD(TAG, "Client login accepted (no auth required) for UPS %s", parts[0].c_str());
@@ -962,11 +964,16 @@ bool NutServerComponent::send_error(NutClient &client, const std::string &error)
 }
 
 bool NutServerComponent::authenticate(const std::string &username, const std::string &password) {
-  if (password_.empty()) {
+  if (!auth_enabled()) {
     // No authentication required
     return true;
   }
-  return (username == username_ && password == password_);
+  for (const auto &user : users_) {
+    if (username == user.username && password == user.password) {
+      return true;
+    }
+  }
+  return false;
 }
 
 std::string NutServerComponent::get_ups_var(const std::string &var_name) {
