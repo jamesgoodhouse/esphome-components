@@ -738,68 +738,20 @@ void HidReportMap::log_field_summary(
 
   int used_count = 0;
   int unused_count = 0;
+  int padding_count = 0;
+  int string_count = 0;
   for (const auto& f : fields_) {
     if (queried_usages.count(f.usage)) {
       used_count++;
+    } else if ((f.usage & 0xFFFF) == 0) {
+      padding_count++;
     } else {
       unused_count++;
     }
   }
 
-  ESP_LOGI(t, "Descriptor: %d used, %d unused of %zu fields",
-           used_count, unused_count, fields_.size());
-
-  if (unused_count == 0) return;
-
-  // Build compact batched output to avoid flooding the serial buffer.
-  // We batch multiple fields per log line, separated by " | ".
-  std::string batch;
-  int batch_count = 0;
-  constexpr int FIELDS_PER_LINE = 3;
-
-  for (const auto& f : fields_) {
-    if (queried_usages.count(f.usage)) continue;
-
-    uint16_t page = (f.usage >> 16) & 0xFFFF;
-    uint16_t uid = f.usage & 0xFFFF;
-    const char* name = usage_name(f.usage);
-
-    // Build short collection context (just innermost parent)
-    const char* parent_name = nullptr;
-    if (!f.usage_path.empty()) {
-      parent_name = usage_name(f.usage_path.back());
-    }
-
-    // Format: "RID:Name(parent)" or "RID:Page:ID(parent)"
-    char entry[80];
-    if (name && parent_name) {
-      snprintf(entry, sizeof(entry), "0x%02X:%s.%s[%u]",
-               f.report_id, parent_name, name, f.bit_size);
-    } else if (name) {
-      snprintf(entry, sizeof(entry), "0x%02X:%s[%u]",
-               f.report_id, name, f.bit_size);
-    } else if (parent_name) {
-      snprintf(entry, sizeof(entry), "0x%02X:%s.P%02X:%04X[%u]",
-               f.report_id, parent_name, page, uid, f.bit_size);
-    } else {
-      snprintf(entry, sizeof(entry), "0x%02X:P%02X:%04X[%u]",
-               f.report_id, page, uid, f.bit_size);
-    }
-
-    if (!batch.empty()) batch += " | ";
-    batch += entry;
-    batch_count++;
-
-    if (batch_count >= FIELDS_PER_LINE) {
-      ESP_LOGI(t, "  UNUSED: %s", batch.c_str());
-      batch.clear();
-      batch_count = 0;
-    }
-  }
-
-  if (!batch.empty()) {
-    ESP_LOGI(t, "  UNUSED: %s", batch.c_str());
-  }
+  ESP_LOGI(t, "Descriptor: %d used, %d unused, %d padding of %zu fields",
+           used_count, unused_count, padding_count, fields_.size());
 }
 
 // =============================================================================
@@ -876,7 +828,7 @@ void HidReportMap::log_unused_field_values(
     batch_count++;
 
     if (batch_count >= FIELDS_PER_LINE) {
-      ESP_LOGI(t, "  VALUES: %s", batch.c_str());
+      ESP_LOGD(t, "  VALUES: %s", batch.c_str());
       batch.clear();
       batch_count = 0;
     }
@@ -884,11 +836,7 @@ void HidReportMap::log_unused_field_values(
   }
 
   if (!batch.empty()) {
-    ESP_LOGI(t, "  VALUES: %s", batch.c_str());
-  }
-
-  if (logged == 0) {
-    ESP_LOGI(t, "  No non-padding unused fields to show values for");
+    ESP_LOGD(t, "  VALUES: %s", batch.c_str());
   }
 }
 
