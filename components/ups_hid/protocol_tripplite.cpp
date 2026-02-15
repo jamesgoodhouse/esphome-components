@@ -111,7 +111,7 @@ bool TrippLiteProtocol::initialize() {
     descriptor_voltage_scale_ = 1.0;
     descriptor_frequency_scale_ = 1.0;
     queried_usages_.clear();
-    field_summary_logged_ = false;
+    descriptor_read_count_ = 0;
 
     // Always determine scaling factors (needed for both modes)
     determine_scaling_factors();
@@ -845,9 +845,13 @@ bool TrippLiteProtocol::read_data_descriptor(UpsData &data) {
                  !std::isnan(data.power.load_percent) ? std::to_string(static_cast<int>(data.power.load_percent)).c_str() : "?",
                  !std::isnan(data.power.frequency) ? std::to_string(static_cast<int>(data.power.frequency)).c_str() : "?");
 
-        // Log unused descriptor fields once (after first successful read)
-        if (!field_summary_logged_) {
-            field_summary_logged_ = true;
+        // Log unused descriptor fields on the 3rd read cycle.
+        // Delayed so the serial buffer isn't competing with init/sensor logs.
+        if (descriptor_read_count_ < 3) {
+            descriptor_read_count_++;
+        }
+        if (descriptor_read_count_ == 3) {
+            descriptor_read_count_ = 255;  // Don't log again
             map->log_field_summary(TL_TAG, queried_usages_);
         }
     } else {

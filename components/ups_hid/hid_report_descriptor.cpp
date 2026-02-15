@@ -735,7 +735,6 @@ void HidReportMap::log_field_summary(
     const char* tag, const std::set<uint32_t>& queried_usages) const {
   const char* t = tag ? tag : TAG;
 
-  // Build a list of unused fields with their context
   int used_count = 0;
   int unused_count = 0;
   for (const auto& f : fields_) {
@@ -746,12 +745,17 @@ void HidReportMap::log_field_summary(
     }
   }
 
-  ESP_LOGI(t, "Descriptor fields: %d used, %d unused out of %zu total",
+  ESP_LOGI(t, "Descriptor: %d used, %d unused of %zu fields",
            used_count, unused_count, fields_.size());
 
   if (unused_count == 0) return;
 
-  ESP_LOGI(t, "--- Unused descriptor fields ---");
+  // Build compact batched output to avoid flooding the serial buffer.
+  // We batch multiple fields per log line, separated by " | ".
+  std::string batch;
+  int batch_count = 0;
+  constexpr int FIELDS_PER_LINE = 3;
+
   for (const auto& f : fields_) {
     if (queried_usages.count(f.usage)) continue;
 
@@ -759,35 +763,42 @@ void HidReportMap::log_field_summary(
     uint16_t uid = f.usage & 0xFFFF;
     const char* name = usage_name(f.usage);
 
-    // Build collection path string
-    std::string path_str;
-    for (auto pu : f.usage_path) {
-      const char* pn = usage_name(pu);
-      if (!path_str.empty()) path_str += ".";
-      if (pn) {
-        path_str += pn;
-      } else {
-        char buf[16];
-        snprintf(buf, sizeof(buf), "0x%04X", (unsigned)(pu & 0xFFFF));
-        path_str += buf;
-      }
+    // Build short collection context (just innermost parent)
+    const char* parent_name = nullptr;
+    if (!f.usage_path.empty()) {
+      parent_name = usage_name(f.usage_path.back());
     }
 
-    if (name) {
-      ESP_LOGI(t, "  RID=0x%02X %s.%s  bits=%u@%u  log=[%ld..%ld]  exp=%d",
-               f.report_id, path_str.c_str(), name,
-               f.bit_size, f.bit_offset,
-               (long)f.logical_min, (long)f.logical_max,
-               f.unit_exponent);
+    // Format: "RID:Name(parent)" or "RID:Page:ID(parent)"
+    char entry[80];
+    if (name && parent_name) {
+      snprintf(entry, sizeof(entry), "0x%02X:%s.%s[%u]",
+               f.report_id, parent_name, name, f.bit_size);
+    } else if (name) {
+      snprintf(entry, sizeof(entry), "0x%02X:%s[%u]",
+               f.report_id, name, f.bit_size);
+    } else if (parent_name) {
+      snprintf(entry, sizeof(entry), "0x%02X:%s.P%02X:%04X[%u]",
+               f.report_id, parent_name, page, uid, f.bit_size);
     } else {
-      ESP_LOGI(t, "  RID=0x%02X %s.Page%02X:0x%04X  bits=%u@%u  log=[%ld..%ld]  exp=%d",
-               f.report_id, path_str.c_str(), page, uid,
-               f.bit_size, f.bit_offset,
-               (long)f.logical_min, (long)f.logical_max,
-               f.unit_exponent);
+      snprintf(entry, sizeof(entry), "0x%02X:P%02X:%04X[%u]",
+               f.report_id, page, uid, f.bit_size);
+    }
+
+    if (!batch.empty()) batch += " | ";
+    batch += entry;
+    batch_count++;
+
+    if (batch_count >= FIELDS_PER_LINE) {
+      ESP_LOGI(t, "  UNUSED: %s", batch.c_str());
+      batch.clear();
+      batch_count = 0;
     }
   }
-  ESP_LOGI(t, "--- End unused fields ---");
+
+  if (!batch.empty()) {
+    ESP_LOGI(t, "  UNUSED: %s", batch.c_str());
+  }
 }
 
 }  // namespace ups_hid
