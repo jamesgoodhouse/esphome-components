@@ -91,6 +91,7 @@ void UpsHidComponent::dump_config() {
   ESP_LOGCONFIG(TAG, "  Protocol Timeout: %u ms", protocol_timeout_ms_);
   ESP_LOGCONFIG(TAG, "  Protocol Selection: %s", protocol_selection_.c_str());
   ESP_LOGCONFIG(TAG, "  Update Interval: %u ms", get_update_interval());
+  ESP_LOGCONFIG(TAG, "  Time Source: %s", time_ != nullptr ? "configured" : "not configured (using uptime)");
 
   if (transport_ && transport_->is_connected()) {
     ESP_LOGCONFIG(TAG, "  Status: %s", status::CONNECTED);
@@ -778,6 +779,9 @@ std::string UpsHidComponent::format_event_timestamp() const {
                now.hour, now.minute, now.second);
       return std::string(buf);
     }
+    ESP_LOGD(TAG, "Time source configured but not yet valid (year=%d)", now.year);
+  } else {
+    ESP_LOGD(TAG, "No time source configured, using uptime");
   }
   // Fallback to uptime
   uint32_t ms = millis();
