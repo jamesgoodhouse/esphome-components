@@ -1,17 +1,16 @@
 #include "state_event_log.h"
 #include <cstdio>
-#include <cmath>
 
 namespace esphome {
 namespace ups_hid {
 
-void StateEventLog::record(uint32_t uptime_ms, const std::string &message) {
+void StateEventLog::record(const std::string &timestamp, const std::string &message) {
   std::lock_guard<std::mutex> lock(mutex_);
 
   if (buffer_.size() < MAX_EVENT_LOG_ENTRIES) {
-    buffer_.push_back({uptime_ms, message});
+    buffer_.push_back({timestamp, message});
   } else {
-    buffer_[head_] = {uptime_ms, message};
+    buffer_[head_] = {timestamp, message};
   }
 
   head_ = (head_ + 1) % MAX_EVENT_LOG_ENTRIES;
@@ -29,7 +28,7 @@ std::string StateEventLog::get_log() const {
   size_t start = (count_ < MAX_EVENT_LOG_ENTRIES) ? 0 : head_;
   for (size_t i = 0; i < count_; i++) {
     size_t idx = (start + i) % MAX_EVENT_LOG_ENTRIES;
-    result += format_uptime(buffer_[idx].uptime_ms);
+    result += buffer_[idx].timestamp;
     result += " ";
     result += buffer_[idx].message;
     result += "\n";
@@ -45,23 +44,12 @@ std::string StateEventLog::get_event(size_t index) const {
   size_t start = (count_ < MAX_EVENT_LOG_ENTRIES) ? 0 : head_;
   size_t idx = (start + index) % MAX_EVENT_LOG_ENTRIES;
 
-  return format_uptime(buffer_[idx].uptime_ms) + " " + buffer_[idx].message;
+  return buffer_[idx].timestamp + " " + buffer_[idx].message;
 }
 
 size_t StateEventLog::size() const {
   std::lock_guard<std::mutex> lock(mutex_);
   return count_;
-}
-
-std::string StateEventLog::format_uptime(uint32_t ms) {
-  uint32_t total_s = ms / 1000;
-  uint32_t h = total_s / 3600;
-  uint32_t m = (total_s % 3600) / 60;
-  uint32_t s = total_s % 60;
-
-  char buf[16];
-  snprintf(buf, sizeof(buf), "+%02u:%02u:%02u", h, m, s);
-  return std::string(buf);
 }
 
 std::string StateSnapshot::status_string() const {

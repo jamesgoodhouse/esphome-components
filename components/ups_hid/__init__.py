@@ -4,8 +4,10 @@ import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome.const import (
     CONF_ID,
+    CONF_TIME_ID,
     CONF_UPDATE_INTERVAL,
 )
+from esphome.components import time as time_ns
 
 DEPENDENCIES = ["esp32"]
 MULTI_CONF = True
@@ -126,6 +128,8 @@ CONFIG_SCHEMA = cv.All(
             ),
             # Fallback nominal voltage (European 230V default for international compatibility)
             cv.Optional(CONF_FALLBACK_NOMINAL_VOLTAGE, default="230V"): validate_fallback_nominal_voltage,
+            # Optional time source for wall-clock timestamps in event log
+            cv.Optional(CONF_TIME_ID): cv.use_id(time_ns.RealTimeClock),
         }
     ).extend(cv.polling_component_schema("30s"))
      .extend(cv.COMPONENT_SCHEMA),
@@ -148,3 +152,7 @@ async def to_code(config):
     cg.add(var.set_protocol_timeout(config[CONF_PROTOCOL_TIMEOUT]))
     cg.add(var.set_protocol_selection(config[CONF_PROTOCOL]))
     cg.add(var.set_fallback_nominal_voltage(config[CONF_FALLBACK_NOMINAL_VOLTAGE]))
+
+    if CONF_TIME_ID in config:
+        time_var = await cg.get_variable(config[CONF_TIME_ID])
+        cg.add(var.set_time(time_var))
