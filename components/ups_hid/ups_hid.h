@@ -21,6 +21,8 @@ namespace esphome { namespace binary_sensor { class BinarySensor; } }
 namespace esphome { namespace text_sensor { class TextSensor; } }
 #endif
 
+#include "state_event_log.h"
+
 #include <memory>
 #include <vector>
 #include <unordered_map>
@@ -145,6 +147,9 @@ namespace esphome
       // Protocol access for button components
       UpsProtocolBase* get_active_protocol() const { return active_protocol_.get(); }
 
+      // State event log -- survives NAS restarts, queryable via NUT or web
+      const StateEventLog &get_event_log() const { return event_log_; }
+
     protected:
       bool simulation_mode_{false};
       uint16_t usb_vendor_id_{0};  // 0 means auto-detect
@@ -175,6 +180,11 @@ namespace esphome
       };
       ErrorRateLimit usb_error_limiter_;
       ErrorRateLimit protocol_error_limiter_;
+
+      // State change event log
+      StateEventLog event_log_;
+      StateSnapshot last_snapshot_;
+      void check_state_changes();
 
       // Clean architecture members
       std::unique_ptr<IUsbTransport> transport_;

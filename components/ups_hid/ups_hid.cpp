@@ -59,6 +59,7 @@ void UpsHidComponent::update() {
   // Normal data reading with active protocol
   if (read_ups_data()) {
     update_sensors();
+    check_state_changes();
     consecutive_failures_ = 0;
     last_successful_read_ = millis();
 
@@ -762,6 +763,70 @@ void UpsHidComponent::set_fast_polling_mode(bool enable) {
       ESP_LOGI(TAG, "Disabled fast polling, returning to normal interval");
     }
   }
+}
+
+// State change detection -- records events to the ring buffer
+void UpsHidComponent::check_state_changes() {
+  StateSnapshot current;
+  {
+    std::lock_guard<std::mutex> lock(data_mutex_);
+    current.online = ups_data_.power.input_voltage_valid();
+    current.on_battery = !current.online;
+    current.low_battery = ups_data_.battery.is_low();
+    current.charging = current.online &&
+                       ups_data_.battery.is_valid() &&
+                       !std::isnan(ups_data_.battery.level) &&
+                       ups_data_.battery.level < 100.0f;
+    current.overloaded = ups_data_.power.is_overloaded();
+    current.fault = ups_data_.power.is_input_out_of_range() ||
+                    (!ups_data_.power.is_valid() && !ups_data_.battery.is_valid());
+
+    float level = ups_data_.battery.is_valid() ? ups_data_.battery.level : NAN;
+    current.battery_level_bucket = std::isnan(level) ? -1 : static_cast<int>(level) / 5;
+    current.valid = true;
+  }
+
+  uint32_t now = millis();
+
+  if (!last_snapshot_.valid) {
+    // First reading -- record initial state
+    char buf[128];
+    snprintf(buf, sizeof(buf), "Initial state: %s, battery %d%%",
+             current.status_string().c_str(),
+             current.battery_level_bucket >= 0 ? current.battery_level_bucket * 5 : -1);
+    event_log_.record(now, buf);
+    ESP_LOGI(TAG, "Event log: %s", buf);
+    last_snapshot_ = current;
+    return;
+  }
+
+  // Check for status flag changes
+  if (current.online != last_snapshot_.online ||
+      current.on_battery != last_snapshot_.on_battery ||
+      current.low_battery != last_snapshot_.low_battery ||
+      current.charging != last_snapshot_.charging ||
+      current.overloaded != last_snapshot_.overloaded ||
+      current.fault != last_snapshot_.fault) {
+    char buf[128];
+    snprintf(buf, sizeof(buf), "Status: %s -> %s",
+             last_snapshot_.status_string().c_str(),
+             current.status_string().c_str());
+    event_log_.record(now, buf);
+    ESP_LOGW(TAG, "Event log: %s", buf);
+  }
+
+  // Check for battery level bucket changes (5% granularity)
+  if (current.battery_level_bucket != last_snapshot_.battery_level_bucket &&
+      current.battery_level_bucket >= 0 && last_snapshot_.battery_level_bucket >= 0) {
+    char buf[128];
+    snprintf(buf, sizeof(buf), "Battery: %d%% -> %d%%",
+             last_snapshot_.battery_level_bucket * 5,
+             current.battery_level_bucket * 5);
+    event_log_.record(now, buf);
+    ESP_LOGI(TAG, "Event log: %s", buf);
+  }
+
+  last_snapshot_ = current;
 }
 
 // Convenient state getters for lambda expressions (no sensor entities required)

@@ -549,12 +549,24 @@ void NutServerComponent::handle_list_var(NutClient &client, const std::string &a
     "ups.power.nominal", "ups.realpower", "ups.realpower.nominal",
     "ups.serial", "ups.status", "ups.test.result",
     "ups.timer.reboot", "ups.timer.shutdown",
+    "ups.debug.event.count",
   };
 
   for (const auto &var : variables) {
     std::string value = get_ups_var(var);
     if (!value.empty()) {
       response += "VAR " + ups_name + " " + var + " \"" + value + "\"\n";
+    }
+  }
+
+  // Append individual event log entries
+  if (ups_hid_) {
+    size_t event_count = ups_hid_->get_event_log().size();
+    for (size_t i = 0; i < event_count; i++) {
+      std::string event = ups_hid_->get_event_log().get_event(i);
+      if (!event.empty()) {
+        response += "VAR " + ups_name + " ups.debug.event." + std::to_string(i) + " \"" + event + "\"\n";
+      }
     }
   }
 
@@ -1135,6 +1147,28 @@ std::string NutServerComponent::get_ups_var(const std::string &var_name) {
 
   if (var_name == "ups.status") {
     return get_ups_status();
+  }
+
+  // Event log variables -- queryable after NAS recovery
+  if (ups_hid_) {
+    const auto &log = ups_hid_->get_event_log();
+
+    if (var_name == "ups.debug.event.count") {
+      return std::to_string(log.size());
+    }
+
+    // ups.debug.event.N -- individual event by index (0 = oldest)
+    const std::string event_prefix = "ups.debug.event.";
+    if (var_name.substr(0, event_prefix.size()) == event_prefix) {
+      std::string idx_str = var_name.substr(event_prefix.size());
+      if (idx_str != "count") {
+        int idx = atoi(idx_str.c_str());
+        if (idx >= 0) {
+          std::string event = log.get_event(static_cast<size_t>(idx));
+          if (!event.empty()) return event;
+        }
+      }
+    }
   }
 
   return "";
