@@ -147,8 +147,11 @@ namespace esphome
       // Protocol access for button components
       UpsProtocolBase* get_active_protocol() const { return active_protocol_.get(); }
 
-      // State event log -- survives NAS restarts, queryable via NUT or web
+      // State event log -- survives reboots via NVS, queryable via NUT
       const StateEventLog &get_event_log() const { return event_log_; }
+
+      // Last reset reason (queryable via NUT as ups.debug.reset.reason)
+      std::string get_reset_reason() const { return last_reset_reason_; }
 
     protected:
       bool simulation_mode_{false};
@@ -184,6 +187,7 @@ namespace esphome
       // State change event log
       StateEventLog event_log_;
       StateSnapshot last_snapshot_;
+      std::string last_reset_reason_;
       void check_state_changes();
 
       // Clean architecture members

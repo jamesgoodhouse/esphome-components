@@ -14,12 +14,47 @@
 #include "esphome/core/application.h"
 #include <functional>
 #include <cmath>
+#ifdef USE_ESP32
+#include "esp_system.h"
+#endif
 
 namespace esphome {
 namespace ups_hid {
 
+#ifdef USE_ESP32
+static const char *get_reset_reason_str() {
+  switch (esp_reset_reason()) {
+    case ESP_RST_POWERON:  return "Power-on";
+    case ESP_RST_EXT:      return "External pin";
+    case ESP_RST_SW:       return "Software reset";
+    case ESP_RST_PANIC:    return "Exception/panic";
+    case ESP_RST_INT_WDT:  return "Interrupt watchdog";
+    case ESP_RST_TASK_WDT: return "Task watchdog";
+    case ESP_RST_WDT:      return "Other watchdog";
+    case ESP_RST_DEEPSLEEP: return "Deep sleep wake";
+    case ESP_RST_BROWNOUT: return "Brownout";
+    case ESP_RST_SDIO:     return "SDIO";
+    default:               return "Unknown";
+  }
+}
+#endif
+
 void UpsHidComponent::setup() {
   ESP_LOGCONFIG(TAG, log_messages::SETTING_UP);
+
+  // Restore event log from previous boot before anything else
+  event_log_.load_from_nvs();
+
+#ifdef USE_ESP32
+  const char *reason = get_reset_reason_str();
+  esp_reset_reason_t reason_code = esp_reset_reason();
+  last_reset_reason_ = std::string(reason) + " (" + std::to_string(static_cast<int>(reason_code)) + ")";
+  ESP_LOGI(TAG, "Last reset reason: %s", last_reset_reason_.c_str());
+
+  // Record boot event with reset reason (persisted to NVS)
+  std::string boot_msg = std::string("Boot: reset=") + reason;
+  event_log_.record(format_event_timestamp(), boot_msg);
+#endif
 
   if (!initialize_transport()) {
     ESP_LOGE(TAG, log_messages::TRANSPORT_INIT_FAILED);

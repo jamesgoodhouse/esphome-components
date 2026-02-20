@@ -9,6 +9,7 @@ namespace esphome {
 namespace ups_hid {
 
 static constexpr size_t MAX_EVENT_LOG_ENTRIES = 64;
+static constexpr size_t NVS_PERSIST_ENTRIES = 16;
 
 struct StateEvent {
   uint32_t uptime_ms{0};
@@ -16,8 +17,8 @@ struct StateEvent {
 };
 
 // Ring buffer of UPS state change events.
-// Entries persist in RAM across NAS/client restarts --
-// query via NUT `GET VAR <ups> ups.debug.event.N` after recovery.
+// Critical events are persisted to NVS flash so they survive reboots.
+// Query via NUT `GET VAR <ups> ups.debug.event.N` after recovery.
 class StateEventLog {
  public:
   void record(uint32_t uptime_ms, const std::string &message);
@@ -31,6 +32,12 @@ class StateEventLog {
 
   // Number of events currently stored.
   size_t size() const;
+
+  // Load previously persisted events from NVS (call once at startup).
+  void load_from_nvs();
+
+  // Persist the most recent events to NVS flash.
+  void save_to_nvs() const;
 
  private:
   mutable std::mutex mutex_;
