@@ -549,6 +549,7 @@ void NutServerComponent::handle_list_var(NutClient &client, const std::string &a
     "ups.power.nominal", "ups.realpower", "ups.realpower.nominal",
     "ups.serial", "ups.status", "ups.test.result",
     "ups.timer.reboot", "ups.timer.shutdown",
+    "ups.debug.reset.reason",
     "ups.debug.event.count",
   };
 
@@ -1149,8 +1150,13 @@ std::string NutServerComponent::get_ups_var(const std::string &var_name) {
     return get_ups_status();
   }
 
-  // Event log variables -- queryable after NAS recovery
+  // Reset reason and event log -- queryable after crash/reboot
   if (ups_hid_) {
+    if (var_name == "ups.debug.reset.reason") {
+      std::string reason = ups_hid_->get_reset_reason();
+      return reason.empty() ? "Unknown" : reason;
+    }
+
     const auto &log = ups_hid_->get_event_log();
 
     if (var_name == "ups.debug.event.count") {
