@@ -590,18 +590,18 @@ static const char* usage_page_name(uint16_t page) {
 
 void HidReportMap::dump(const char* tag) const {
   const char* t = tag ? tag : TAG;
-  ESP_LOGI(t, "=== HID Report Map: %zu fields ===", fields_.size());
+  ESP_LOGD(t, "=== HID Report Map: %zu fields ===", fields_.size());
 
   auto ids = get_report_ids();
-  ESP_LOGI(t, "Report IDs: %zu unique", ids.size());
+  ESP_LOGD(t, "Report IDs: %zu unique", ids.size());
   for (uint8_t id : ids) {
     size_t feat_sz = get_report_size_bytes(id, HID_REPORT_TYPE_FEATURE);
     size_t inp_sz  = get_report_size_bytes(id, HID_REPORT_TYPE_INPUT);
     if (feat_sz > 0) {
-      ESP_LOGI(t, "  Report 0x%02X: Feature %zu bytes", id, feat_sz);
+      ESP_LOGD(t, "  Report 0x%02X: Feature %zu bytes", id, feat_sz);
     }
     if (inp_sz > 0) {
-      ESP_LOGI(t, "  Report 0x%02X: Input %zu bytes", id, inp_sz);
+      ESP_LOGD(t, "  Report 0x%02X: Input %zu bytes", id, inp_sz);
     }
   }
 
@@ -609,7 +609,7 @@ void HidReportMap::dump(const char* tag) const {
     const HidField& f = fields_[i];
     uint16_t page = (f.usage >> 16) & 0xFFFF;
     uint16_t uid  = f.usage & 0xFFFF;
-    ESP_LOGI(t,
+    ESP_LOGD(t,
              "  [%zu] RID=0x%02X %s  Usage=%s:0x%04X  bits=%u@%u  "
              "log=[%ld..%ld]  phys=[%ld..%ld]  exp=%d",
              i, f.report_id, report_type_name(f.report_type),
@@ -619,7 +619,7 @@ void HidReportMap::dump(const char* tag) const {
              (long)f.physical_min, (long)f.physical_max,
              f.unit_exponent);
   }
-  ESP_LOGI(t, "=== End HID Report Map ===");
+  ESP_LOGD(t, "=== End HID Report Map ===");
 }
 
 // =============================================================================

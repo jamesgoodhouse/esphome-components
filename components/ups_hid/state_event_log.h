@@ -12,7 +12,7 @@ static constexpr size_t MAX_EVENT_LOG_ENTRIES = 64;
 static constexpr size_t NVS_PERSIST_ENTRIES = 16;
 
 struct StateEvent {
-  uint32_t uptime_ms{0};
+  std::string timestamp;
   std::string message;
 };
 
@@ -21,7 +21,7 @@ struct StateEvent {
 // Query via NUT `GET VAR <ups> ups.debug.event.N` after recovery.
 class StateEventLog {
  public:
-  void record(uint32_t uptime_ms, const std::string &message);
+  void record(const std::string &timestamp, const std::string &message);
 
   // Returns all events oldest-first as a formatted string.
   std::string get_log() const;
@@ -45,7 +45,6 @@ class StateEventLog {
   size_t head_{0};   // Next write position
   size_t count_{0};  // Number of stored events
 
-  static std::string format_uptime(uint32_t ms);
 };
 
 // Snapshot of key UPS state fields for change detection.

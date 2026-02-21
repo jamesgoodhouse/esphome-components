@@ -23,6 +23,8 @@ namespace esphome { namespace text_sensor { class TextSensor; } }
 
 #include "state_event_log.h"
 
+namespace esphome { namespace time { class RealTimeClock; } }
+
 #include <memory>
 #include <vector>
 #include <unordered_map>
@@ -90,6 +92,7 @@ namespace esphome
       }
       void set_protocol_selection(const std::string &protocol) { protocol_selection_ = protocol; }
       void set_fallback_nominal_voltage(float voltage) { fallback_nominal_voltage_ = voltage; }
+      void set_time(time::RealTimeClock *time) { time_ = time; }
 
       // Data getters for sensors (thread-safe)
       UpsData get_ups_data() const {
@@ -184,11 +187,15 @@ namespace esphome
       ErrorRateLimit usb_error_limiter_;
       ErrorRateLimit protocol_error_limiter_;
 
+      // Optional time source for wall-clock timestamps in event log
+      time::RealTimeClock *time_{nullptr};
+
       // State change event log
       StateEventLog event_log_;
       StateSnapshot last_snapshot_;
       std::string last_reset_reason_;
       void check_state_changes();
+      std::string format_event_timestamp() const;
 
       // Clean architecture members
       std::unique_ptr<IUsbTransport> transport_;

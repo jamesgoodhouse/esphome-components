@@ -12,6 +12,7 @@
 #include "protocol_generic.h"
 #include "esphome/core/log.h"
 #include "esphome/core/application.h"
+#include "esphome/components/time/real_time_clock.h"
 #include <functional>
 #include <cmath>
 #ifdef USE_ESP32
@@ -125,6 +126,7 @@ void UpsHidComponent::dump_config() {
   ESP_LOGCONFIG(TAG, "  Protocol Timeout: %u ms", protocol_timeout_ms_);
   ESP_LOGCONFIG(TAG, "  Protocol Selection: %s", protocol_selection_.c_str());
   ESP_LOGCONFIG(TAG, "  Update Interval: %u ms", get_update_interval());
+  ESP_LOGCONFIG(TAG, "  Time Source: %s", time_ != nullptr ? "configured" : "not configured (using uptime)");
 
   if (transport_ && transport_->is_connected()) {
     ESP_LOGCONFIG(TAG, "  Status: %s", status::CONNECTED);
@@ -800,6 +802,33 @@ void UpsHidComponent::set_fast_polling_mode(bool enable) {
   }
 }
 
+// Format a timestamp for event log entries.
+// Uses wall-clock time if a time source is configured and synced, otherwise uptime.
+std::string UpsHidComponent::format_event_timestamp() const {
+  if (time_ != nullptr) {
+    auto now = time_->now();
+    if (now.is_valid()) {
+      char buf[24];
+      snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d",
+               now.year, now.month, now.day_of_month,
+               now.hour, now.minute, now.second);
+      return std::string(buf);
+    }
+    ESP_LOGD(TAG, "Time source configured but not yet valid (year=%d)", now.year);
+  } else {
+    ESP_LOGD(TAG, "No time source configured, using uptime");
+  }
+  // Fallback to uptime
+  uint32_t ms = millis();
+  uint32_t total_s = ms / 1000;
+  uint32_t h = total_s / 3600;
+  uint32_t m = (total_s % 3600) / 60;
+  uint32_t s = total_s % 60;
+  char buf[16];
+  snprintf(buf, sizeof(buf), "+%02u:%02u:%02u", h, m, s);
+  return std::string(buf);
+}
+
 // State change detection -- records events to the ring buffer
 void UpsHidComponent::check_state_changes() {
   StateSnapshot current;
@@ -821,7 +850,7 @@ void UpsHidComponent::check_state_changes() {
     current.valid = true;
   }
 
-  uint32_t now = millis();
+  std::string ts = format_event_timestamp();
 
   if (!last_snapshot_.valid) {
     // First reading -- record initial state
@@ -829,7 +858,7 @@ void UpsHidComponent::check_state_changes() {
     snprintf(buf, sizeof(buf), "Initial state: %s, battery %d%%",
              current.status_string().c_str(),
              current.battery_level_bucket >= 0 ? current.battery_level_bucket * 5 : -1);
-    event_log_.record(now, buf);
+    event_log_.record(ts, buf);
     ESP_LOGI(TAG, "Event log: %s", buf);
     last_snapshot_ = current;
     return;
@@ -846,7 +875,7 @@ void UpsHidComponent::check_state_changes() {
     snprintf(buf, sizeof(buf), "Status: %s -> %s",
              last_snapshot_.status_string().c_str(),
              current.status_string().c_str());
-    event_log_.record(now, buf);
+    event_log_.record(ts, buf);
     ESP_LOGW(TAG, "Event log: %s", buf);
   }
 
@@ -857,7 +886,7 @@ void UpsHidComponent::check_state_changes() {
     snprintf(buf, sizeof(buf), "Battery: %d%% -> %d%%",
              last_snapshot_.battery_level_bucket * 5,
              current.battery_level_bucket * 5);
-    event_log_.record(now, buf);
+    event_log_.record(ts, buf);
     ESP_LOGI(TAG, "Event log: %s", buf);
   }
 
