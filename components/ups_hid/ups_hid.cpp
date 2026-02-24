@@ -63,54 +63,75 @@ void UpsHidComponent::setup() {
     return;
   }
 
-  // Protocol detection is deferred to update() method to handle asynchronous USB enumeration
+  // Launch background task for USB reads so loop() never blocks
+  usb_task_running_.store(true);
+  xTaskCreatePinnedToCore(
+      usb_read_task, "ups_usb_read", 8192, this, 1, &usb_read_task_handle_, 1);
+  ESP_LOGI(TAG, "USB read task started on core 1");
+
   ESP_LOGCONFIG(TAG, log_messages::SETUP_COMPLETE);
 }
 
 void UpsHidComponent::update() {
-  if (!transport_ || !transport_->is_connected()) {
-    // Device not connected yet - normal during startup or after disconnection
-    ESP_LOGD(TAG, log_messages::WAITING_FOR_DEVICE);
-    return;
-  }
-
-  // Check if protocol detection is needed
-  if (!active_protocol_) {
-    ESP_LOGI(TAG, log_messages::ATTEMPTING_DETECTION);
-    if (detect_protocol()) {
-      ESP_LOGI(TAG, log_messages::PROTOCOL_DETECTED);
-      consecutive_failures_ = 0;
-    } else {
-      consecutive_failures_++;
-      ESP_LOGW(TAG, log_messages::DETECTION_FAILED, consecutive_failures_);
-
-      if (consecutive_failures_ > max_consecutive_failures_) {
-        ESP_LOGE(TAG, log_messages::TOO_MANY_FAILURES);
-        mark_failed();
-      }
-      return;
-    }
-  }
-
-  // Normal data reading with active protocol
-  if (read_ups_data()) {
+  // update() runs on ESPHome's main loop -- never blocks on USB.
+  // The background task does all USB I/O and sets new_data_available_.
+  if (new_data_available_.exchange(false)) {
     update_sensors();
     check_state_changes();
-    consecutive_failures_ = 0;
-    last_successful_read_ = millis();
-
-    // Check for timer updates (fast polling during countdowns)
     check_and_update_timers();
-  } else {
-    consecutive_failures_++;
-    ESP_LOGW(TAG, log_messages::READ_FAILED, consecutive_failures_);
+  }
+}
 
-    if (consecutive_failures_ > max_consecutive_failures_) {
-      ESP_LOGW(TAG, log_messages::RESETTING_PROTOCOL);
-      active_protocol_.reset();  // Force protocol re-detection on next update
-      report_map_.reset();       // Re-fetch descriptor on re-detection
-      consecutive_failures_ = 0;
+void UpsHidComponent::usb_read_task(void *param) {
+  auto *self = static_cast<UpsHidComponent *>(param);
+  self->usb_read_loop();
+  vTaskDelete(nullptr);
+}
+
+void UpsHidComponent::usb_read_loop() {
+  while (usb_task_running_.load()) {
+    uint32_t interval = get_update_interval();
+
+    if (!transport_ || !transport_->is_connected()) {
+      ESP_LOGD(TAG, log_messages::WAITING_FOR_DEVICE);
+      vTaskDelay(pdMS_TO_TICKS(interval));
+      continue;
     }
+
+    // Protocol detection
+    if (!active_protocol_) {
+      ESP_LOGI(TAG, log_messages::ATTEMPTING_DETECTION);
+      if (detect_protocol()) {
+        ESP_LOGI(TAG, log_messages::PROTOCOL_DETECTED);
+        consecutive_failures_ = 0;
+      } else {
+        consecutive_failures_++;
+        ESP_LOGW(TAG, log_messages::DETECTION_FAILED, consecutive_failures_);
+        if (consecutive_failures_ > max_consecutive_failures_) {
+          ESP_LOGE(TAG, log_messages::TOO_MANY_FAILURES);
+        }
+        vTaskDelay(pdMS_TO_TICKS(interval));
+        continue;
+      }
+    }
+
+    // Read data (this is the slow USB I/O part)
+    if (read_ups_data()) {
+      new_data_available_.store(true);
+      consecutive_failures_ = 0;
+      last_successful_read_ = millis();
+    } else {
+      consecutive_failures_++;
+      ESP_LOGW(TAG, log_messages::READ_FAILED, consecutive_failures_);
+      if (consecutive_failures_ > max_consecutive_failures_) {
+        ESP_LOGW(TAG, log_messages::RESETTING_PROTOCOL);
+        active_protocol_.reset();
+        report_map_.reset();
+        consecutive_failures_ = 0;
+      }
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(interval));
   }
 }
 
@@ -725,6 +746,16 @@ void UpsHidComponent::log_suppressed_errors(ErrorRateLimit& limiter) {
 }
 
 void UpsHidComponent::cleanup() {
+  // Stop the background task before tearing down transport
+  if (usb_task_running_.load()) {
+    usb_task_running_.store(false);
+    if (usb_read_task_handle_) {
+      // Give the task time to exit its loop
+      vTaskDelay(pdMS_TO_TICKS(200));
+      usb_read_task_handle_ = nullptr;
+    }
+  }
+
   if (transport_) {
     transport_->deinitialize();
     transport_.reset();

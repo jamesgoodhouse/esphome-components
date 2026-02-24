@@ -30,6 +30,7 @@ namespace esphome { namespace time { class RealTimeClock; } }
 #include <unordered_map>
 #include <string>
 #include <mutex>
+#include <atomic>
 
 #ifdef USE_ESP32
 #include "esp_err.h"
@@ -170,6 +171,13 @@ namespace esphome
       uint32_t max_consecutive_failures_{5};  // Limit re-detection attempts
       UpsData ups_data_;
       mutable std::mutex data_mutex_;  // Protect ups_data_ access
+
+      // Background USB read task -- keeps loop() non-blocking
+      TaskHandle_t usb_read_task_handle_{nullptr};
+      std::atomic<bool> new_data_available_{false};
+      std::atomic<bool> usb_task_running_{false};
+      static void usb_read_task(void *param);
+      void usb_read_loop();
 
       // Fast polling for timer countdown
       bool fast_polling_mode_{false};
