@@ -158,9 +158,7 @@ namespace esphome
       std::string get_reset_reason() const { return last_reset_reason_; }
 
       // Milliseconds since last successful data read (0 if never read)
-      uint32_t get_data_age_ms() const {
-        return last_successful_read_ > 0 ? millis() - last_successful_read_ : 0;
-      }
+      uint32_t get_data_age_ms() const;
 
     protected:
       bool simulation_mode_{false};

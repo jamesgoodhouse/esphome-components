@@ -987,6 +987,10 @@ bool UpsHidComponent::has_fault() const {
          (!ups_data_.power.is_valid() && !ups_data_.battery.is_valid());
 }
 
+uint32_t UpsHidComponent::get_data_age_ms() const {
+  return last_successful_read_ > 0 ? millis() - last_successful_read_ : 0;
+}
+
 bool UpsHidComponent::is_overloaded() const {
   std::lock_guard<std::mutex> lock(data_mutex_);
   // Use power's built-in overload detection
