@@ -33,6 +33,9 @@ class StateEventLog {
   // Number of events currently stored.
   size_t size() const;
 
+  // Clear all events from memory and NVS.
+  void clear();
+
   // Load previously persisted events from NVS (call once at startup).
   void load_from_nvs();
 

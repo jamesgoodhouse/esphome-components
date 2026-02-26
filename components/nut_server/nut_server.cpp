@@ -1263,6 +1263,9 @@ bool NutServerComponent::execute_command(const std::string &command) {
     return ups_hid_->start_ups_test();
   } else if (command == "test.panel.stop" || command == "test.ups.stop") {
     return ups_hid_->stop_ups_test();
+  } else if (command == "debug.event.clear") {
+    ups_hid_->get_event_log_mut().clear();
+    return true;
   }
 
   return false;

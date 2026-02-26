@@ -13,12 +13,25 @@ void UpsHidButton::dump_config() {
     ESP_LOGCONFIG(BUTTON_TAG, "  Beeper action: %s", beeper_action_.c_str());
   } else if (button_type_ == BUTTON_TYPE_TEST) {
     ESP_LOGCONFIG(BUTTON_TAG, "  Test action: %s", test_action_.c_str());
+  } else if (button_type_ == BUTTON_TYPE_DEBUG) {
+    ESP_LOGCONFIG(BUTTON_TAG, "  Debug action: %s", debug_action_.c_str());
   }
 }
 
 void UpsHidButton::press_action() {
   if (!parent_) {
     ESP_LOGE(BUTTON_TAG, log_messages::NO_PARENT_COMPONENT);
+    return;
+  }
+
+  // Debug actions don't need USB/protocol
+  if (button_type_ == BUTTON_TYPE_DEBUG) {
+    if (debug_action_ == "clear_event_log") {
+      ESP_LOGI(BUTTON_TAG, "Clearing event log");
+      parent_->get_event_log_mut().clear();
+    } else {
+      ESP_LOGE(BUTTON_TAG, "Unknown debug action: %s", debug_action_.c_str());
+    }
     return;
   }
 
@@ -31,14 +44,12 @@ void UpsHidButton::press_action() {
     return;
   }
 
-  // Get the current protocol from the parent component
   UpsData ups_data = parent_->get_ups_data();
   if (ups_data.device.detected_protocol == DeviceInfo::PROTOCOL_UNKNOWN) {
     ESP_LOGW(BUTTON_TAG, "UPS protocol not detected, cannot execute button action");
     return;
   }
 
-  // Get the active protocol
   auto active_protocol = parent_->get_active_protocol();
   if (!active_protocol) {
     ESP_LOGE(BUTTON_TAG, "No active protocol available");

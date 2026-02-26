@@ -153,6 +153,7 @@ namespace esphome
 
       // State event log -- survives reboots via NVS, queryable via NUT
       const StateEventLog &get_event_log() const { return event_log_; }
+      StateEventLog &get_event_log_mut() { return event_log_; }
 
       // Last reset reason (queryable via NUT as ups.debug.reset.reason)
       std::string get_reset_reason() const { return last_reset_reason_; }

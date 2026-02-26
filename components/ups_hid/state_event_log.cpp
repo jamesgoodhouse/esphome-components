@@ -65,6 +65,25 @@ size_t StateEventLog::size() const {
   return count_;
 }
 
+void StateEventLog::clear() {
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    buffer_.clear();
+    head_ = 0;
+    count_ = 0;
+  }
+
+  // Wipe NVS persisted entries
+  nvs_handle_t handle;
+  if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle) == ESP_OK) {
+    nvs_erase_all(handle);
+    nvs_commit(handle);
+    nvs_close(handle);
+  }
+
+  ESP_LOGI(NVS_TAG, "Event log cleared (memory and NVS)");
+}
+
 void StateEventLog::load_from_nvs() {
   std::lock_guard<std::mutex> lock(mutex_);
 
