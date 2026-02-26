@@ -131,7 +131,8 @@ void UpsHidComponent::usb_read_loop() {
         }
 
         // Exponential backoff: 5s, 10s, 20s, 30s, 30s, ...
-        uint32_t backoff = interval * (1 << std::min(consecutive_failures_, 3u));
+        uint32_t shift = consecutive_failures_ < 3 ? consecutive_failures_ : 3;
+        uint32_t backoff = interval * (1 << shift);
         if (backoff > 30000) backoff = 30000;
         vTaskDelay(pdMS_TO_TICKS(backoff));
         continue;
