@@ -553,9 +553,20 @@ bool TrippLiteProtocol::read_data_descriptor(UpsData &data) {
             uint8_t &count = report_fail_count_[rid];
             if (count < 255) count++;
             if (count == REPORT_FAIL_THRESHOLD) {
-                ESP_LOGW(TL_TAG, "Report 0x%02X has failed %u consecutive times (%zu bytes expected)",
+                ESP_LOGW(TL_TAG, "Report 0x%02X has failed %u consecutive reads (%zu bytes expected)",
                          rid, REPORT_FAIL_THRESHOLD,
                          report_sizes_.count(rid) ? report_sizes_[rid] : 0);
+                // Log what usages the descriptor says are in this report
+                auto fields = map->get_fields_for_report(rid, HID_REPORT_TYPE_FEATURE);
+                for (const auto *f : fields) {
+                    uint16_t page = (f->usage >> 16) & 0xFFFF;
+                    uint16_t id = f->usage & 0xFFFF;
+                    ESP_LOGW(TL_TAG, "  -> usage 0x%04X:0x%04X (%s page), %u bits @ offset %u",
+                             page, id,
+                             page == 0x0084 ? "Power Device" :
+                             page == 0x0085 ? "Battery System" : "other",
+                             f->bit_size, f->bit_offset);
+                }
             }
         }
     }
