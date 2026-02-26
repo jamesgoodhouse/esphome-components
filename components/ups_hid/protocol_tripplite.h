@@ -97,6 +97,8 @@ private:
     std::set<uint8_t> available_input_reports_;
     std::set<uint8_t> available_feature_reports_;
     std::map<uint8_t, size_t> report_sizes_;
+    std::map<uint8_t, uint8_t> report_fail_count_;
+    static constexpr uint8_t REPORT_FAIL_THRESHOLD = 5;
     bool device_info_read_{false};
 
     // === HID communication ===

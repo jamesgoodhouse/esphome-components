@@ -547,8 +547,16 @@ bool TrippLiteProtocol::read_data_descriptor(UpsData &data) {
         if (read_hid_report(rid, report) && !report.data.empty()) {
             report_cache[rid] = std::move(report.data);
             reports_read++;
+            report_fail_count_[rid] = 0;
         } else {
             reports_failed++;
+            uint8_t &count = report_fail_count_[rid];
+            if (count < 255) count++;
+            if (count == REPORT_FAIL_THRESHOLD) {
+                ESP_LOGW(TL_TAG, "Report 0x%02X has failed %u consecutive times (%zu bytes expected)",
+                         rid, REPORT_FAIL_THRESHOLD,
+                         report_sizes_.count(rid) ? report_sizes_[rid] : 0);
+            }
         }
     }
 
@@ -558,10 +566,10 @@ bool TrippLiteProtocol::read_data_descriptor(UpsData &data) {
     }
 
     if (reports_failed > 0) {
-        ESP_LOGW(TL_TAG, "Partial read: %d/%zu reports succeeded, %d failed",
+        ESP_LOGD(TL_TAG, "Read %d/%zu reports (%d failed)",
                  reports_read, available_feature_reports_.size(), reports_failed);
     } else {
-        ESP_LOGD(TL_TAG, "Read all %d/%zu reports", reports_read, available_feature_reports_.size());
+        ESP_LOGD(TL_TAG, "Read all %d reports", reports_read);
     }
 
     // Step 2: Extract values using the parsed descriptor
