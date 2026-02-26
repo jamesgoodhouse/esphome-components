@@ -89,7 +89,10 @@ bool TrippLiteProtocol::detect() {
         vTaskDelay(pdMS_TO_TICKS(timing::REPORT_RETRY_DELAY_MS));
     }
 
-    ESP_LOGW(TL_TAG, "Failed to read any HID reports from Tripp Lite device");
+    std::string last_err = parent_->get_transport_error();
+    ESP_LOGW(TL_TAG, "Failed to read any HID reports from Tripp Lite device%s%s",
+             last_err.empty() ? "" : " (last transport error: ",
+             last_err.empty() ? "" : (last_err + ")").c_str());
     return false;
 }
 

@@ -143,16 +143,17 @@ esp_err_t Esp32UsbTransport::hid_get_report(uint8_t report_type, uint8_t report_
         return ESP_ERR_NO_MEM;
     }
 
-    // Simple context for completion
     struct {
         SemaphoreHandle_t sem;
         esp_err_t result;
         size_t actual_bytes;
-    } ctx = {done_sem, ESP_ERR_TIMEOUT, 0};
+        usb_transfer_status_t usb_status;
+    } ctx = {done_sem, ESP_ERR_TIMEOUT, 0, USB_TRANSFER_STATUS_ERROR};
 
     transfer->context = &ctx;
     transfer->callback = [](usb_transfer_t *t) {
         auto *c = static_cast<decltype(ctx)*>(t->context);
+        c->usb_status = t->status;
         c->result = (t->status == USB_TRANSFER_STATUS_COMPLETED) ? ESP_OK : ESP_FAIL;
         c->actual_bytes = t->actual_num_bytes;
         xSemaphoreGive(c->sem);
@@ -170,16 +171,25 @@ esp_err_t Esp32UsbTransport::hid_get_report(uint8_t report_type, uint8_t report_
 
                 ESP_LOGD(ESP32_USB_TAG, "HID GET_REPORT success: received %zu bytes", *data_len);
             } else {
-                ESP_LOGD(ESP32_USB_TAG, "HID GET_REPORT: No data received for report 0x%02X", report_id);
+                static const char *status_names[] = {
+                    "COMPLETED", "ERROR", "TIMED_OUT", "CANCELED",
+                    "STALL", "NO_DEVICE", "OVERFLOW"
+                };
+                int si = static_cast<int>(ctx.usb_status);
+                const char *sname = (si >= 0 && si <= 6) ? status_names[si] : "UNKNOWN";
+                ESP_LOGD(ESP32_USB_TAG, "HID GET_REPORT 0x%02X failed: usb_status=%s(%d), bytes=%zu",
+                         report_id, sname, si, ctx.actual_bytes);
                 *data_len = 0;
                 ret = ESP_FAIL;
             }
         } else {
-            ESP_LOGW(ESP32_USB_TAG, "HID GET_REPORT timeout");
+            ESP_LOGW(ESP32_USB_TAG, "HID GET_REPORT timeout (report 0x%02X, %ums)",
+                     report_id, timeout_ms);
             ret = ESP_ERR_TIMEOUT;
         }
     } else {
-        ESP_LOGW(ESP32_USB_TAG, "Failed to submit HID GET_REPORT: %s", esp_err_to_name(ret));
+        ESP_LOGW(ESP32_USB_TAG, "Failed to submit HID GET_REPORT 0x%02X: %s",
+                 report_id, esp_err_to_name(ret));
     }
 
     vSemaphoreDelete(done_sem);

@@ -15,6 +15,7 @@
 #include "esphome/components/time/real_time_clock.h"
 #include <functional>
 #include <cmath>
+#include <algorithm>
 #ifdef USE_ESP32
 #include "esp_system.h"
 #endif
@@ -63,11 +64,12 @@ void UpsHidComponent::setup() {
     return;
   }
 
-  // Launch background task for USB reads so loop() never blocks
+  // Launch background task for USB reads so loop() never blocks.
+  // Not pinned to a specific core -- the USB host stack may have
+  // core affinity requirements.
   usb_task_running_.store(true);
-  xTaskCreatePinnedToCore(
-      usb_read_task, "ups_usb_read", 8192, this, 1, &usb_read_task_handle_, 1);
-  ESP_LOGI(TAG, "USB read task started on core 1");
+  xTaskCreate(usb_read_task, "ups_usb_read", 8192, this, 1, &usb_read_task_handle_);
+  ESP_LOGI(TAG, "USB read task started");
 
   ESP_LOGCONFIG(TAG, log_messages::SETUP_COMPLETE);
 }
@@ -107,10 +109,31 @@ void UpsHidComponent::usb_read_loop() {
       } else {
         consecutive_failures_++;
         ESP_LOGW(TAG, log_messages::DETECTION_FAILED, consecutive_failures_);
-        if (consecutive_failures_ > max_consecutive_failures_) {
-          ESP_LOGE(TAG, log_messages::TOO_MANY_FAILURES);
+
+        // After 10 consecutive detection failures, reinitialize the USB transport
+        // to recover from stale handles or broken USB pipe state
+        static constexpr uint32_t TRANSPORT_RESET_THRESHOLD = 10;
+        if (consecutive_failures_ > 0 &&
+            consecutive_failures_ % TRANSPORT_RESET_THRESHOLD == 0) {
+          ESP_LOGW(TAG, "Reinitializing USB transport after %u detection failures",
+                   consecutive_failures_);
+          if (transport_) {
+            transport_->deinitialize();
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            esp_err_t ret = transport_->initialize();
+            if (ret != ESP_OK) {
+              ESP_LOGE(TAG, "Transport reinitialization failed: %s",
+                       transport_->get_last_error().c_str());
+            } else {
+              ESP_LOGI(TAG, "Transport reinitialized, retrying detection");
+            }
+          }
         }
-        vTaskDelay(pdMS_TO_TICKS(interval));
+
+        // Exponential backoff: 5s, 10s, 20s, 30s, 30s, ...
+        uint32_t backoff = interval * (1 << std::min(consecutive_failures_, 3u));
+        if (backoff > 30000) backoff = 30000;
+        vTaskDelay(pdMS_TO_TICKS(backoff));
         continue;
       }
     }
@@ -268,6 +291,10 @@ uint16_t UpsHidComponent::get_vendor_id() const {
 
 uint16_t UpsHidComponent::get_product_id() const {
   return transport_ ? transport_->get_product_id() : defaults::AUTO_DETECT_PRODUCT_ID;
+}
+
+std::string UpsHidComponent::get_transport_error() const {
+  return transport_ ? transport_->get_last_error() : "no transport";
 }
 
 // Core implementation methods

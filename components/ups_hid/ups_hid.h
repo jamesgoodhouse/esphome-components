@@ -261,6 +261,7 @@ namespace esphome
       bool is_connected() const;
       uint16_t get_vendor_id() const;
       uint16_t get_product_id() const;
+      std::string get_transport_error() const;
 
       // Legacy compatibility for protocols
       bool is_device_connected() const { return is_connected(); }
