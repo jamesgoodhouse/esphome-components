@@ -372,8 +372,17 @@ bool UpsHidComponent::read_ups_data() {
   bool success = active_protocol_->read_data(new_data);
 
   if (success) {
-    // Merge only valid fields into the persistent data
+    uint8_t prev_stale = ups_data_.power.status_stale_cycles;
     ups_data_.merge_from(new_data);
+
+    if (ups_data_.power.status_stale_cycles == 0 && prev_stale > 0) {
+      ESP_LOGI(TAG, "Status freshly determined after %u stale cycle(s): %s",
+               prev_stale, ups_data_.power.status.c_str());
+    } else if (ups_data_.power.status_stale_cycles > 0) {
+      ESP_LOGW(TAG, "Status not determined this cycle (%u/%u stale), keeping: %s",
+               ups_data_.power.status_stale_cycles, PowerData::MAX_STALE_CYCLES,
+               ups_data_.power.status.empty() ? "(cleared)" : ups_data_.power.status.c_str());
+    }
     ESP_LOGV(TAG, "Successfully read and merged UPS data");
   } else {
     ESP_LOGW(TAG, "Failed to read UPS data via protocol");

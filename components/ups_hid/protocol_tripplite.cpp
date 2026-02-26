@@ -535,24 +535,34 @@ bool TrippLiteProtocol::read_data_descriptor(UpsData &data) {
 
     ESP_LOGV(TL_TAG, "Reading Tripp Lite HID data (descriptor mode)...");
 
-    // Step 1: Read ALL available feature reports into a cache
+    // Step 1: Read ALL available feature reports into a cache.
+    // Each report is a separate USB HID GET_REPORT request.
+    // Individual reports can fail while others succeed.
     std::map<uint8_t, std::vector<uint8_t>> report_cache;
     int reports_read = 0;
+    int reports_failed = 0;
 
     for (uint8_t rid : available_feature_reports_) {
         HidReport report;
         if (read_hid_report(rid, report) && !report.data.empty()) {
             report_cache[rid] = std::move(report.data);
             reports_read++;
+        } else {
+            reports_failed++;
         }
     }
 
     if (reports_read == 0) {
-        ESP_LOGW(TL_TAG, "No reports could be read");
+        ESP_LOGW(TL_TAG, "All %zu report reads failed", available_feature_reports_.size());
         return false;
     }
 
-    ESP_LOGV(TL_TAG, "Read %d/%zu reports", reports_read, available_feature_reports_.size());
+    if (reports_failed > 0) {
+        ESP_LOGW(TL_TAG, "Partial read: %d/%zu reports succeeded, %d failed",
+                 reports_read, available_feature_reports_.size(), reports_failed);
+    } else {
+        ESP_LOGD(TL_TAG, "Read all %d/%zu reports", reports_read, available_feature_reports_.size());
+    }
 
     // Step 2: Extract values using the parsed descriptor
     // Full 32-bit usages: (page << 16) | usage_id
@@ -886,6 +896,17 @@ bool TrippLiteProtocol::read_data_descriptor(UpsData &data) {
             data.power.status = status::ONLINE;
         } else if (!std::isnan(data.power.output_voltage) && data.power.output_voltage > 10.0f) {
             data.power.status = status::ONLINE;
+        } else {
+            ESP_LOGW(TL_TAG,
+                "Status undetermined: discharging=%s, ac_present=%s, "
+                "input_v=%s, present=%s, output_v=%s",
+                std::isnan(discharging) ? "NaN" : (discharging > 0 ? "1" : "0"),
+                std::isnan(ac_present) ? "NaN" : (ac_present > 0 ? "1" : "0"),
+                std::isnan(data.power.input_voltage) ? "NaN" :
+                    std::to_string(data.power.input_voltage).c_str(),
+                std::isnan(present) ? "NaN" : (present > 0 ? "1" : "0"),
+                std::isnan(data.power.output_voltage) ? "NaN" :
+                    std::to_string(data.power.output_voltage).c_str());
         }
     }
 

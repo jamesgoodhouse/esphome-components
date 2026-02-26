@@ -549,6 +549,7 @@ void NutServerComponent::handle_list_var(NutClient &client, const std::string &a
     "ups.power.nominal", "ups.realpower", "ups.realpower.nominal",
     "ups.serial", "ups.status", "ups.test.result",
     "ups.timer.reboot", "ups.timer.shutdown",
+    "ups.debug.read.status",
     "ups.debug.reset.reason",
     "ups.debug.event.count",
   };
@@ -1150,8 +1151,20 @@ std::string NutServerComponent::get_ups_var(const std::string &var_name) {
     return get_ups_status();
   }
 
-  // Reset reason and event log -- queryable after crash/reboot
+  // Debug diagnostics -- queryable via upsc
   if (ups_hid_) {
+    if (var_name == "ups.debug.read.status") {
+      auto data = ups_hid_->get_ups_data();
+      uint32_t age_ms = ups_hid_->get_data_age_ms();
+      char buf[128];
+      snprintf(buf, sizeof(buf), "proto=%s stale=%u/%u age=%ums",
+               data.power.status.empty() ? "(empty)" : data.power.status.c_str(),
+               data.power.status_stale_cycles,
+               data.power.MAX_STALE_CYCLES,
+               age_ms);
+      return std::string(buf);
+    }
+
     if (var_name == "ups.debug.reset.reason") {
       std::string reason = ups_hid_->get_reset_reason();
       return reason.empty() ? "Unknown" : reason;
