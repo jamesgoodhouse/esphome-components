@@ -42,6 +42,12 @@ struct PowerData {
   bool awaiting_power{false};          // UPS waiting for AC power to return
   bool voltage_out_of_range{false};    // Input voltage out of range
 
+  // How many consecutive read cycles the status was not freshly determined.
+  // After MAX_STALE_CYCLES, status is forced to empty so downstream doesn't
+  // keep acting on a state that may no longer be true.
+  uint8_t status_stale_cycles{0};
+  static constexpr uint8_t MAX_STALE_CYCLES = 3;
+
   // Power quality indicators
   bool input_voltage_valid() const {
     return !std::isnan(input_voltage) && input_voltage > 50.0f && input_voltage < 300.0f;
@@ -72,6 +78,52 @@ struct PowerData {
   // Validation and utility methods
   bool is_valid() const {
     return input_voltage_valid() || output_voltage_valid() || has_load_info();
+  }
+
+  // Merge valid fields from a fresh read, keeping old values where new data is NAN/empty.
+  // Prevents transient USB read failures from clobbering good data with NAN.
+  void merge_from(const PowerData& other) {
+    if (!std::isnan(other.input_voltage)) input_voltage = other.input_voltage;
+    if (!std::isnan(other.input_voltage_nominal)) input_voltage_nominal = other.input_voltage_nominal;
+    if (!std::isnan(other.input_transfer_low)) input_transfer_low = other.input_transfer_low;
+    if (!std::isnan(other.input_transfer_high)) input_transfer_high = other.input_transfer_high;
+    if (!std::isnan(other.frequency)) frequency = other.frequency;
+    if (!std::isnan(other.input_frequency_nominal)) input_frequency_nominal = other.input_frequency_nominal;
+    if (!std::isnan(other.output_voltage)) output_voltage = other.output_voltage;
+    if (!std::isnan(other.output_voltage_nominal)) output_voltage_nominal = other.output_voltage_nominal;
+    if (!std::isnan(other.output_current)) output_current = other.output_current;
+    if (!std::isnan(other.output_frequency)) output_frequency = other.output_frequency;
+    if (!std::isnan(other.active_power)) active_power = other.active_power;
+    if (!std::isnan(other.load_percent)) load_percent = other.load_percent;
+    if (!std::isnan(other.realpower_nominal)) realpower_nominal = other.realpower_nominal;
+    if (!std::isnan(other.apparent_power_nominal)) apparent_power_nominal = other.apparent_power_nominal;
+
+    // Status and derived bools: only trust when protocol could determine state.
+    // "Unknown" means the key HID reports failed to read; keep previous state
+    // for a few cycles to ride out transient glitches.
+    if (!other.status.empty() && other.status != "Unknown") {
+      status = other.status;
+      boost_active = other.boost_active;
+      buck_active = other.buck_active;
+      over_temperature = other.over_temperature;
+      communication_lost = other.communication_lost;
+      shutdown_imminent = other.shutdown_imminent;
+      awaiting_power = other.awaiting_power;
+      voltage_out_of_range = other.voltage_out_of_range;
+      status_stale_cycles = 0;
+    } else {
+      status_stale_cycles++;
+      if (status_stale_cycles >= MAX_STALE_CYCLES) {
+        status.clear();
+        boost_active = false;
+        buck_active = false;
+        over_temperature = false;
+        communication_lost = false;
+        shutdown_imminent = false;
+        awaiting_power = false;
+        voltage_out_of_range = false;
+      }
+    }
   }
 
   void reset() {

@@ -35,6 +35,16 @@ struct UpsCompositeData {
     return battery.is_valid() && power.is_valid();
   }
   
+  // Merge valid fields from a fresh read into the persistent data.
+  // Only overwrites fields where the new read produced a valid value.
+  void merge_from(const UpsCompositeData& other) {
+    battery.merge_from(other.battery);
+    power.merge_from(other.power);
+    if (other.device.is_valid()) device = other.device;
+    if (other.test.is_valid()) test = other.test;
+    if (other.config.is_valid()) config = other.config;
+  }
+
   // Clean reset without legacy flags
   void reset() {
     battery.reset();

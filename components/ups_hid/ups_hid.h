@@ -169,6 +169,7 @@ namespace esphome
       uint32_t last_successful_read_{0};
       uint32_t consecutive_failures_{0};
       uint32_t max_consecutive_failures_{5};  // Limit re-detection attempts
+      static constexpr uint32_t DATA_STALE_TIMEOUT_MS = 60000;  // 60s without successful read → reset
       UpsData ups_data_;
       mutable std::mutex data_mutex_;  // Protect ups_data_ access
 

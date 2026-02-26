@@ -129,6 +129,19 @@ void UpsHidComponent::usb_read_loop() {
         report_map_.reset();
         consecutive_failures_ = 0;
       }
+
+      // If no successful read for a long time, reset to avoid serving stale data
+      if (last_successful_read_ > 0 &&
+          (millis() - last_successful_read_) > DATA_STALE_TIMEOUT_MS) {
+        ESP_LOGW(TAG, "No successful read for %us, clearing stale data",
+                 DATA_STALE_TIMEOUT_MS / 1000);
+        std::lock_guard<std::mutex> lock(data_mutex_);
+        DeviceInfo saved_device = ups_data_.device;
+        ups_data_.reset();
+        ups_data_.device = saved_device;
+        last_successful_read_ = 0;
+        new_data_available_.store(true);
+      }
     }
 
     vTaskDelay(pdMS_TO_TICKS(interval));
@@ -351,20 +364,17 @@ bool UpsHidComponent::read_ups_data() {
 
   std::lock_guard<std::mutex> lock(data_mutex_);
 
-  // Preserve device info across read cycles (it's static and only read once)
-  DeviceInfo saved_device = ups_data_.device;
+  // Read into a fresh temporary so partial USB failures produce NAN
+  // rather than clobbering previously-good values in ups_data_.
+  UpsData new_data;
+  new_data.device = ups_data_.device;
 
-  // Reset data before reading
-  ups_data_.reset();
-
-  // Restore device info (manufacturer, model, serial, firmware, protocol, etc.)
-  ups_data_.device = saved_device;
-
-  // Read data through protocol
-  bool success = active_protocol_->read_data(ups_data_);
+  bool success = active_protocol_->read_data(new_data);
 
   if (success) {
-    ESP_LOGV(TAG, "Successfully read UPS data");
+    // Merge only valid fields into the persistent data
+    ups_data_.merge_from(new_data);
+    ESP_LOGV(TAG, "Successfully read and merged UPS data");
   } else {
     ESP_LOGW(TAG, "Failed to read UPS data via protocol");
   }
@@ -865,8 +875,17 @@ void UpsHidComponent::check_state_changes() {
   StateSnapshot current;
   {
     std::lock_guard<std::mutex> lock(data_mutex_);
-    current.online = ups_data_.power.input_voltage_valid();
-    current.on_battery = !current.online;
+    const auto& s = ups_data_.power.status;
+    if (s == status::ON_BATTERY) {
+      current.online = false;
+      current.on_battery = true;
+    } else if (!s.empty() && s != status::UNKNOWN) {
+      current.online = true;
+      current.on_battery = false;
+    } else {
+      current.online = ups_data_.power.input_voltage_valid();
+      current.on_battery = !current.online;
+    }
     current.low_battery = ups_data_.battery.is_low();
     current.charging = current.online &&
                        ups_data_.battery.is_valid() &&
@@ -924,37 +943,37 @@ void UpsHidComponent::check_state_changes() {
   last_snapshot_ = current;
 }
 
-// Convenient state getters for lambda expressions (no sensor entities required)
+// Convenient state getters for lambda expressions (no sensor entities required).
+// These use the protocol-reported status string as primary indicator, falling
+// back to voltage checks only when status is unknown or not yet determined.
 bool UpsHidComponent::is_online() const {
   std::lock_guard<std::mutex> lock(data_mutex_);
-  // UPS is online when input voltage is valid (same logic as binary sensor update)
+  const auto& s = ups_data_.power.status;
+  if (s == status::ON_BATTERY) return false;
+  if (!s.empty() && s != status::UNKNOWN) return true;
   return ups_data_.power.input_voltage_valid();
 }
 
 bool UpsHidComponent::is_on_battery() const {
   std::lock_guard<std::mutex> lock(data_mutex_);
-  // UPS is on battery when NOT online (opposite of online state)
-  return !ups_data_.power.input_voltage_valid();
+  return ups_data_.power.status == status::ON_BATTERY;
 }
 
 bool UpsHidComponent::is_low_battery() const {
   std::lock_guard<std::mutex> lock(data_mutex_);
-  // Use battery's built-in low battery detection
   return ups_data_.battery.is_low();
 }
 
 bool UpsHidComponent::is_charging() const {
   std::lock_guard<std::mutex> lock(data_mutex_);
-  // Charging when online AND battery level is not 100%
-  return ups_data_.power.input_voltage_valid() &&
-         ups_data_.battery.is_valid() &&
+  if (ups_data_.power.status == status::ON_BATTERY) return false;
+  return ups_data_.battery.is_valid() &&
          !std::isnan(ups_data_.battery.level) &&
          ups_data_.battery.level < 100.0f;
 }
 
 bool UpsHidComponent::has_fault() const {
   std::lock_guard<std::mutex> lock(data_mutex_);
-  // Check for various fault conditions based on available data
   return ups_data_.power.is_input_out_of_range() ||
          (!ups_data_.power.is_valid() && !ups_data_.battery.is_valid());
 }

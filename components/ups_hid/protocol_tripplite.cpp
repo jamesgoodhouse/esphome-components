@@ -872,7 +872,9 @@ bool TrippLiteProtocol::read_data_descriptor(UpsData &data) {
     data.power.awaiting_power = (!std::isnan(awaiting_power) && awaiting_power > 0);
     data.power.voltage_out_of_range = (!std::isnan(voltage_oor) && voltage_oor > 0);
 
-    // Determine power status (input_voltage is already scaled/converted at this point)
+    // Determine power status (input_voltage is already scaled/converted at this point).
+    // If none of the indicators yield a definitive answer, leave status empty
+    // so the merge layer keeps the previous known-good value.
     if (data.power.status.empty()) {
         if (!std::isnan(discharging) && discharging > 0) {
             data.power.status = status::ON_BATTERY;
@@ -884,8 +886,6 @@ bool TrippLiteProtocol::read_data_descriptor(UpsData &data) {
             data.power.status = status::ONLINE;
         } else if (!std::isnan(data.power.output_voltage) && data.power.output_voltage > 10.0f) {
             data.power.status = status::ONLINE;
-        } else {
-            data.power.status = status::UNKNOWN;
         }
     }
 
