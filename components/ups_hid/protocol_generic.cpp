@@ -68,7 +68,7 @@ bool GenericHidProtocol::detect() {
     
     // Try Input Report first (real-time data)
     buffer_len = sizeof(buffer);
-    esp_err_t ret = parent_->hid_get_report(HID_REPORT_TYPE_INPUT, report_id, buffer, &buffer_len, parent_->get_protocol_timeout());
+    esp_err_t ret = parent_->hid_get_report(HID_REPORT_TYPE_INPUT, report_id, buffer, &buffer_len, parent_->get_report_timeout());
     if (ret == ESP_OK && buffer_len > 0) {
       available_input_reports_.insert(report_id);
       ESP_LOGI(GEN_TAG, "Found Input report 0x%02X (%zu bytes)", report_id, buffer_len);
@@ -84,7 +84,7 @@ bool GenericHidProtocol::detect() {
     
     // Try Feature Report (static/configuration data)
     buffer_len = sizeof(buffer);
-    ret = parent_->hid_get_report(HID_REPORT_TYPE_FEATURE, report_id, buffer, &buffer_len, parent_->get_protocol_timeout());
+    ret = parent_->hid_get_report(HID_REPORT_TYPE_FEATURE, report_id, buffer, &buffer_len, parent_->get_report_timeout());
     if (ret == ESP_OK && buffer_len > 0) {
       available_feature_reports_.insert(report_id);
       ESP_LOGI(GEN_TAG, "Found Feature report 0x%02X (%zu bytes)", report_id, buffer_len);
@@ -303,7 +303,7 @@ void GenericHidProtocol::enumerate_reports()
 
     // Check Input reports
     buffer_len = sizeof(buffer);
-    esp_err_t ret = parent_->hid_get_report(HID_REPORT_TYPE_INPUT, id, buffer, &buffer_len, parent_->get_protocol_timeout());
+    esp_err_t ret = parent_->hid_get_report(HID_REPORT_TYPE_INPUT, id, buffer, &buffer_len, parent_->get_report_timeout());
     if (ret == ESP_OK && buffer_len > 0)
     {
       available_input_reports_.insert(id);
@@ -321,7 +321,7 @@ void GenericHidProtocol::enumerate_reports()
 
     // Check Feature reports
     buffer_len = sizeof(buffer);
-    ret = parent_->hid_get_report(HID_REPORT_TYPE_FEATURE, id, buffer, &buffer_len, parent_->get_protocol_timeout());
+    ret = parent_->hid_get_report(HID_REPORT_TYPE_FEATURE, id, buffer, &buffer_len, parent_->get_report_timeout());
     if (ret == ESP_OK && buffer_len > 0)
     {
       available_feature_reports_.insert(id);
@@ -361,7 +361,7 @@ void GenericHidProtocol::enumerate_reports()
     }
 
     buffer_len = sizeof(buffer);
-    esp_err_t ret = parent_->hid_get_report(HID_REPORT_TYPE_INPUT, id, buffer, &buffer_len, parent_->get_protocol_timeout());
+    esp_err_t ret = parent_->hid_get_report(HID_REPORT_TYPE_INPUT, id, buffer, &buffer_len, parent_->get_report_timeout());
     if (ret == ESP_OK && buffer_len > 0)
     {
       available_input_reports_.insert(id);
@@ -382,7 +382,7 @@ bool GenericHidProtocol::read_report(uint8_t report_id, uint8_t *buffer, size_t 
   if (available_input_reports_.count(report_id))
   {
     buffer_len = limits::MAX_HID_REPORT_SIZE;
-    esp_err_t ret = parent_->hid_get_report(HID_REPORT_TYPE_INPUT, report_id, buffer, &buffer_len, parent_->get_protocol_timeout());
+    esp_err_t ret = parent_->hid_get_report(HID_REPORT_TYPE_INPUT, report_id, buffer, &buffer_len, parent_->get_report_timeout());
     if (ret == ESP_OK && buffer_len > 0)
     {
       ESP_LOGV(GEN_TAG, "Read Input report 0x%02X: %zu bytes", report_id, buffer_len);
@@ -394,7 +394,7 @@ bool GenericHidProtocol::read_report(uint8_t report_id, uint8_t *buffer, size_t 
   if (available_feature_reports_.count(report_id))
   {
     buffer_len = limits::MAX_HID_REPORT_SIZE;
-    esp_err_t ret = parent_->hid_get_report(HID_REPORT_TYPE_FEATURE, report_id, buffer, &buffer_len, parent_->get_protocol_timeout());
+    esp_err_t ret = parent_->hid_get_report(HID_REPORT_TYPE_FEATURE, report_id, buffer, &buffer_len, parent_->get_report_timeout());
     if (ret == ESP_OK && buffer_len > 0)
     {
       ESP_LOGV(GEN_TAG, "Read Feature report 0x%02X: %zu bytes", report_id, buffer_len);
@@ -876,7 +876,7 @@ bool GenericHidProtocol::start_battery_test_quick()
     uint8_t test_data[2] = {report_id, test::COMMAND_QUICK}; // Command value 1 = Quick test
 
     ESP_LOGD(GEN_TAG, "Trying quick battery test with report ID 0x%02X", report_id);
-    esp_err_t ret = parent_->hid_set_report(0x03, report_id, test_data, sizeof(test_data), parent_->get_protocol_timeout());
+    esp_err_t ret = parent_->hid_set_report(0x03, report_id, test_data, sizeof(test_data), parent_->get_report_timeout());
 
     if (ret == ESP_OK)
     {
@@ -906,7 +906,7 @@ bool GenericHidProtocol::start_battery_test_deep()
     uint8_t test_data[2] = {report_id, test::COMMAND_DEEP}; // Command value 2 = Deep test
 
     ESP_LOGD(GEN_TAG, "Trying deep battery test with report ID 0x%02X", report_id);
-    esp_err_t ret = parent_->hid_set_report(0x03, report_id, test_data, sizeof(test_data), parent_->get_protocol_timeout());
+    esp_err_t ret = parent_->hid_set_report(0x03, report_id, test_data, sizeof(test_data), parent_->get_report_timeout());
 
     if (ret == ESP_OK)
     {
@@ -936,7 +936,7 @@ bool GenericHidProtocol::stop_battery_test()
     uint8_t test_data[2] = {report_id, test::COMMAND_ABORT}; // Command value 3 = Abort test
 
     ESP_LOGD(GEN_TAG, "Trying battery test stop with report ID 0x%02X", report_id);
-    esp_err_t ret = parent_->hid_set_report(0x03, report_id, test_data, sizeof(test_data), parent_->get_protocol_timeout());
+    esp_err_t ret = parent_->hid_set_report(0x03, report_id, test_data, sizeof(test_data), parent_->get_report_timeout());
 
     if (ret == ESP_OK)
     {
@@ -966,7 +966,7 @@ bool GenericHidProtocol::start_ups_test()
     uint8_t test_data[2] = {report_id, 1}; // Command value 1 = Start test
 
     ESP_LOGD(GEN_TAG, "Trying UPS test with report ID 0x%02X", report_id);
-    esp_err_t ret = parent_->hid_set_report(0x03, report_id, test_data, sizeof(test_data), parent_->get_protocol_timeout());
+    esp_err_t ret = parent_->hid_set_report(0x03, report_id, test_data, sizeof(test_data), parent_->get_report_timeout());
 
     if (ret == ESP_OK)
     {
@@ -996,7 +996,7 @@ bool GenericHidProtocol::stop_ups_test()
     uint8_t test_data[2] = {report_id, 0}; // Command value 0 = Stop test
 
     ESP_LOGD(GEN_TAG, "Trying UPS test stop with report ID 0x%02X", report_id);
-    esp_err_t ret = parent_->hid_set_report(0x03, report_id, test_data, sizeof(test_data), parent_->get_protocol_timeout());
+    esp_err_t ret = parent_->hid_set_report(0x03, report_id, test_data, sizeof(test_data), parent_->get_report_timeout());
 
     if (ret == ESP_OK)
     {
@@ -1158,7 +1158,7 @@ bool GenericHidProtocol::set_shutdown_delay(int seconds)
     ESP_LOGD(TAG, "Trying shutdown delay on report 0x%02X: %d seconds", report_id, seconds);
 
     esp_err_t ret = parent_->hid_set_report(HID_REPORT_TYPE_FEATURE, report_id,
-                                            delay_data, 2, parent_->get_protocol_timeout());
+                                            delay_data, 2, parent_->get_report_timeout());
 
     if (ret == ESP_OK)
     {
@@ -1202,7 +1202,7 @@ bool GenericHidProtocol::set_start_delay(int seconds)
     ESP_LOGD(TAG, "Trying start delay on report 0x%02X: %d seconds", report_id, seconds);
 
     esp_err_t ret = parent_->hid_set_report(HID_REPORT_TYPE_FEATURE, report_id,
-                                            delay_data, 2, parent_->get_protocol_timeout());
+                                            delay_data, 2, parent_->get_report_timeout());
 
     if (ret == ESP_OK)
     {

@@ -93,29 +93,40 @@ void UpsHidComponent::check_task_health() {
   if (hb == 0) return;  // Task hasn't started its first iteration yet
 
   uint32_t age = millis() - hb;
-  // Allow generous time: protocol timeout can be 10-15s per report, and a
-  // full read cycle touches ~55 reports.  60 seconds without a heartbeat
-  // means the task is stuck or dead.
   static constexpr uint32_t TASK_HEALTH_TIMEOUT_MS = 60000;
   if (age < TASK_HEALTH_TIMEOUT_MS) return;
 
-  ESP_LOGE(TAG, "USB read task heartbeat stale (%ums ago) - task appears dead, restarting",
+  ESP_LOGE(TAG, "USB read task heartbeat stale (%ums ago) - task is hung or dead",
            age);
 
-  // Clean up the old task handle if possible
+  // Kill the hung read task
   if (usb_read_task_handle_) {
     vTaskDelete(usb_read_task_handle_);
     usb_read_task_handle_ = nullptr;
   }
 
-  // Reset state so the new task starts fresh
+  // Reset protocol state
   active_protocol_.reset();
   report_map_.reset();
   consecutive_failures_ = 0;
   usb_task_heartbeat_.store(0);
 
+  // The USB client/lib tasks may also be dead or corrupted (the most common
+  // cause of a hung read task is a use-after-free that killed the client
+  // task, so callbacks stop being delivered).  Tear down and rebuild the
+  // entire transport to get fresh USB host tasks.
+  if (transport_) {
+    ESP_LOGW(TAG, "Reinitializing USB transport as part of recovery");
+    transport_->deinitialize();
+    esp_err_t ret = transport_->initialize();
+    if (ret != ESP_OK) {
+      ESP_LOGE(TAG, "Transport reinitialization failed: %s",
+               transport_->get_last_error().c_str());
+    }
+  }
+
   xTaskCreate(usb_read_task, "ups_usb_read", 8192, this, 1, &usb_read_task_handle_);
-  ESP_LOGI(TAG, "USB read task restarted");
+  ESP_LOGI(TAG, "USB read task restarted with fresh transport");
 }
 
 void UpsHidComponent::usb_read_task(void *param) {

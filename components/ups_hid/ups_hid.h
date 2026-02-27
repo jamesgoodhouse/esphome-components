@@ -102,6 +102,7 @@ namespace esphome
       }
       std::string get_protocol_name() const;
       uint32_t get_protocol_timeout() const { return protocol_timeout_ms_; }
+      uint32_t get_report_timeout() const { return report_timeout_ms_; }
       float get_fallback_nominal_voltage() const { return fallback_nominal_voltage_; }
 
       // Convenient state getters for lambda expressions (no sensor entities required)
@@ -166,6 +167,7 @@ namespace esphome
       uint16_t usb_vendor_id_{0};  // 0 means auto-detect
       uint16_t usb_product_id_{0}; // 0 means auto-detect
       uint32_t protocol_timeout_ms_{10000};
+      uint32_t report_timeout_ms_{2000};  // Per-report USB timeout (much shorter than protocol timeout)
       std::string protocol_selection_{"auto"};
       float fallback_nominal_voltage_{230.0f};  // European standard (230V) for international compatibility
 

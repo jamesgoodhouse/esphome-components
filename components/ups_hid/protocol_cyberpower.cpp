@@ -261,7 +261,7 @@ bool CyberPowerProtocol::read_hid_report(uint8_t report_id, HidReport &report) {
   ESP_LOGD(CP_TAG, "Attempting to read report 0x%02X from parent device", report_id);
   
   // CyberPower devices primarily use Feature Reports (0x03) - based on NUT debug logs
-  ret = parent_->hid_get_report(HID_REPORT_TYPE_FEATURE, report_id, buffer, &buffer_len, parent_->get_protocol_timeout());
+  ret = parent_->hid_get_report(HID_REPORT_TYPE_FEATURE, report_id, buffer, &buffer_len, parent_->get_report_timeout());
   if (ret == ESP_OK && buffer_len > 0) {
     report.report_id = report_id;
     report.data.assign(buffer, buffer + buffer_len);
@@ -280,7 +280,7 @@ bool CyberPowerProtocol::read_hid_report(uint8_t report_id, HidReport &report) {
   
   // Fallback: try Input Report (0x01) for real-time data
   buffer_len = sizeof(buffer);
-  ret = parent_->hid_get_report(HID_REPORT_TYPE_INPUT, report_id, buffer, &buffer_len, parent_->get_protocol_timeout());
+  ret = parent_->hid_get_report(HID_REPORT_TYPE_INPUT, report_id, buffer, &buffer_len, parent_->get_report_timeout());
   if (ret == ESP_OK && buffer_len > 0) {
     report.report_id = report_id;
     report.data.assign(buffer, buffer + buffer_len);
@@ -962,7 +962,7 @@ bool CyberPowerProtocol::beeper_enable() {
   
   uint8_t beeper_data[2] = {BEEPER_STATUS_REPORT_ID, beeper::CONTROL_ENABLE};  // Report ID, Value=2 (enabled)
   
-  esp_err_t ret = parent_->hid_set_report(HID_REPORT_TYPE_FEATURE, BEEPER_STATUS_REPORT_ID, beeper_data, sizeof(beeper_data), parent_->get_protocol_timeout());
+  esp_err_t ret = parent_->hid_set_report(HID_REPORT_TYPE_FEATURE, BEEPER_STATUS_REPORT_ID, beeper_data, sizeof(beeper_data), parent_->get_report_timeout());
   if (ret == ESP_OK) {
     ESP_LOGI(CP_TAG, "CyberPower beeper enabled successfully with report ID 0x%02X", BEEPER_STATUS_REPORT_ID);
     return true;
@@ -980,7 +980,7 @@ bool CyberPowerProtocol::beeper_disable() {
   
   uint8_t beeper_data[2] = {BEEPER_STATUS_REPORT_ID, beeper::CONTROL_DISABLE};  // Report ID, Value=1 (disabled)
   
-  esp_err_t ret = parent_->hid_set_report(HID_REPORT_TYPE_FEATURE, BEEPER_STATUS_REPORT_ID, beeper_data, sizeof(beeper_data), parent_->get_protocol_timeout());
+  esp_err_t ret = parent_->hid_set_report(HID_REPORT_TYPE_FEATURE, BEEPER_STATUS_REPORT_ID, beeper_data, sizeof(beeper_data), parent_->get_report_timeout());
   if (ret == ESP_OK) {
     ESP_LOGI(CP_TAG, "CyberPower beeper disabled successfully with report ID 0x%02X", BEEPER_STATUS_REPORT_ID);
     return true;
@@ -999,7 +999,7 @@ bool CyberPowerProtocol::beeper_mute() {
   // - Different from DISABLE (1) which turns off beeper completely
   uint8_t beeper_data[2] = {BEEPER_STATUS_REPORT_ID, beeper::CONTROL_MUTE};  // Report ID, Value=3 (muted/acknowledged)
   
-  esp_err_t ret = parent_->hid_set_report(HID_REPORT_TYPE_FEATURE, BEEPER_STATUS_REPORT_ID, beeper_data, sizeof(beeper_data), parent_->get_protocol_timeout());
+  esp_err_t ret = parent_->hid_set_report(HID_REPORT_TYPE_FEATURE, BEEPER_STATUS_REPORT_ID, beeper_data, sizeof(beeper_data), parent_->get_report_timeout());
   if (ret == ESP_OK) {
     ESP_LOGI(CP_TAG, "CyberPower beeper muted (current alarms acknowledged) successfully");
     return true;
@@ -1051,7 +1051,7 @@ bool CyberPowerProtocol::beeper_test() {
   // Step 4: Restore original beeper state
   ESP_LOGI(CP_TAG, "Step 4: Restoring original beeper state: %d", original_state);
   uint8_t restore_data[2] = {BEEPER_STATUS_REPORT_ID, original_state};
-  esp_err_t ret = parent_->hid_set_report(HID_REPORT_TYPE_FEATURE, BEEPER_STATUS_REPORT_ID, restore_data, sizeof(restore_data), parent_->get_protocol_timeout());
+  esp_err_t ret = parent_->hid_set_report(HID_REPORT_TYPE_FEATURE, BEEPER_STATUS_REPORT_ID, restore_data, sizeof(restore_data), parent_->get_report_timeout());
   
   if (ret == ESP_OK) {
     ESP_LOGI(CP_TAG, "CyberPower beeper test sequence completed successfully");
@@ -1070,7 +1070,7 @@ bool CyberPowerProtocol::start_battery_test_quick() {
   // Quick test command value is 1 (from NUT test_write_info)
   uint8_t test_data[2] = {TEST_RESULT_REPORT_ID, test::COMMAND_QUICK}; // Report ID 0x14, value 1 = Quick test
   
-  esp_err_t ret = parent_->hid_set_report(HID_REPORT_TYPE_FEATURE, TEST_RESULT_REPORT_ID, test_data, 2, parent_->get_protocol_timeout());
+  esp_err_t ret = parent_->hid_set_report(HID_REPORT_TYPE_FEATURE, TEST_RESULT_REPORT_ID, test_data, 2, parent_->get_report_timeout());
   if (ret == ESP_OK) {
     ESP_LOGI(CP_TAG, "Quick battery test command sent successfully");
     return true;
@@ -1086,7 +1086,7 @@ bool CyberPowerProtocol::start_battery_test_deep() {
   // Deep test command value is 2 (from NUT test_write_info)
   uint8_t test_data[2] = {TEST_RESULT_REPORT_ID, test::COMMAND_DEEP}; // Report ID 0x14, value 2 = Deep test
   
-  esp_err_t ret = parent_->hid_set_report(HID_REPORT_TYPE_FEATURE, TEST_RESULT_REPORT_ID, test_data, 2, parent_->get_protocol_timeout());
+  esp_err_t ret = parent_->hid_set_report(HID_REPORT_TYPE_FEATURE, TEST_RESULT_REPORT_ID, test_data, 2, parent_->get_report_timeout());
   if (ret == ESP_OK) {
     ESP_LOGI(CP_TAG, "Deep battery test command sent successfully");
     return true;
@@ -1102,7 +1102,7 @@ bool CyberPowerProtocol::stop_battery_test() {
   // Abort test command value is 3 (from NUT test_write_info)
   uint8_t test_data[2] = {TEST_RESULT_REPORT_ID, test::COMMAND_ABORT}; // Report ID 0x14, value 3 = Abort test
   
-  esp_err_t ret = parent_->hid_set_report(HID_REPORT_TYPE_FEATURE, TEST_RESULT_REPORT_ID, test_data, 2, parent_->get_protocol_timeout());
+  esp_err_t ret = parent_->hid_set_report(HID_REPORT_TYPE_FEATURE, TEST_RESULT_REPORT_ID, test_data, 2, parent_->get_report_timeout());
   if (ret == ESP_OK) {
     ESP_LOGI(CP_TAG, "Battery test stop command sent successfully");
     return true;
@@ -1402,7 +1402,7 @@ bool CyberPowerProtocol::set_shutdown_delay(int seconds) {
            DELAY_SHUTDOWN_REPORT_ID, seconds, delay_data[1], delay_data[2]);
   
   esp_err_t ret = parent_->hid_set_report(HID_REPORT_TYPE_FEATURE, DELAY_SHUTDOWN_REPORT_ID, 
-                                         delay_data + 1, 2, parent_->get_protocol_timeout());
+                                         delay_data + 1, 2, parent_->get_report_timeout());
   
   if (ret == ESP_OK) {
     ESP_LOGI(CP_TAG, "Shutdown delay set successfully to %d seconds", seconds);
@@ -1433,7 +1433,7 @@ bool CyberPowerProtocol::set_start_delay(int seconds) {
            DELAY_START_REPORT_ID, seconds, delay_data[1], delay_data[2]);
   
   esp_err_t ret = parent_->hid_set_report(HID_REPORT_TYPE_FEATURE, DELAY_START_REPORT_ID, 
-                                         delay_data + 1, 2, parent_->get_protocol_timeout());
+                                         delay_data + 1, 2, parent_->get_report_timeout());
   
   if (ret == ESP_OK) {
     ESP_LOGI(CP_TAG, "Start delay set successfully to %d seconds", seconds);

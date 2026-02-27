@@ -315,7 +315,7 @@ bool ApcHidProtocol::read_hid_report(uint8_t report_id, HidReport &report) {
   // CRITICAL FIX: Try Input Report first (HID_REPORT_TYPE_INPUT) - this is what NUT uses for real-time data
   // Based on NUT logs showing PowerSummary fields work with Input Reports
   ESP_LOGV(APC_HID_TAG, "Trying Input report 0x%02X...", report_id);
-  ret = parent_->hid_get_report(HID_REPORT_TYPE_INPUT, report_id, buffer, &buffer_len, parent_->get_protocol_timeout());
+  ret = parent_->hid_get_report(HID_REPORT_TYPE_INPUT, report_id, buffer, &buffer_len, parent_->get_report_timeout());
   if (ret == ESP_OK && buffer_len > 0) {
     report.report_id = report_id;
     report.data.assign(buffer, buffer + buffer_len);
@@ -333,7 +333,7 @@ bool ApcHidProtocol::read_hid_report(uint8_t report_id, HidReport &report) {
   // Fall back to Feature Report (HID_REPORT_TYPE_FEATURE) for static/config data
   buffer_len = sizeof(buffer); // Reset buffer length
   ESP_LOGV(APC_HID_TAG, "Trying Feature report 0x%02X...", report_id);
-  ret = parent_->hid_get_report(HID_REPORT_TYPE_FEATURE, report_id, buffer, &buffer_len, parent_->get_protocol_timeout());
+  ret = parent_->hid_get_report(HID_REPORT_TYPE_FEATURE, report_id, buffer, &buffer_len, parent_->get_report_timeout());
   if (ret == ESP_OK && buffer_len > 0) {
     report.report_id = report_id;
     report.data.assign(buffer, buffer + buffer_len);
@@ -377,7 +377,7 @@ bool ApcHidProtocol::write_hid_report(const HidReport &report) {
   const uint8_t report_type = HID_REPORT_TYPE_FEATURE; // Feature Report
   
   esp_err_t ret = parent_->hid_set_report(report_type, report.report_id, 
-                                          report.data.data(), report.data.size(), parent_->get_protocol_timeout());
+                                          report.data.data(), report.data.size(), parent_->get_report_timeout());
   if (ret != ESP_OK) {
     ESP_LOGD(APC_HID_TAG, "HID SET_REPORT failed: %s", esp_err_to_name(ret));
     return false;
@@ -1607,7 +1607,7 @@ bool ApcHidProtocol::beeper_enable() {
     uint8_t beeper_data[2] = {report_id, beeper::CONTROL_ENABLE};  // Report ID, Value=2 (enabled)
     
 #ifdef USE_ESP32
-    esp_err_t ret = parent_->hid_set_report(HID_REPORT_TYPE_FEATURE, report_id, beeper_data, sizeof(beeper_data), parent_->get_protocol_timeout());
+    esp_err_t ret = parent_->hid_set_report(HID_REPORT_TYPE_FEATURE, report_id, beeper_data, sizeof(beeper_data), parent_->get_report_timeout());
     if (ret == ESP_OK) {
       ESP_LOGI(APC_HID_TAG, "APC beeper enabled successfully with report ID 0x%02X", report_id);
       return true;
@@ -1643,7 +1643,7 @@ bool ApcHidProtocol::beeper_disable() {
     
     uint8_t beeper_data[2] = {report_id, beeper::CONTROL_DISABLE};  // Report ID, Value=1 (disabled)
     
-    esp_err_t ret = parent_->hid_set_report(HID_REPORT_TYPE_FEATURE, report_id, beeper_data, sizeof(beeper_data), parent_->get_protocol_timeout());
+    esp_err_t ret = parent_->hid_set_report(HID_REPORT_TYPE_FEATURE, report_id, beeper_data, sizeof(beeper_data), parent_->get_report_timeout());
     if (ret == ESP_OK) {
       ESP_LOGI(APC_HID_TAG, "APC beeper disabled successfully with report ID 0x%02X", report_id);
       return true;
@@ -1673,7 +1673,7 @@ bool ApcHidProtocol::beeper_mute() {
     
     uint8_t beeper_data[2] = {report_id, beeper::CONTROL_MUTE};  // Report ID, Value=3 (muted/acknowledged)
     
-    esp_err_t ret = parent_->hid_set_report(HID_REPORT_TYPE_FEATURE, report_id, beeper_data, sizeof(beeper_data), parent_->get_protocol_timeout());
+    esp_err_t ret = parent_->hid_set_report(HID_REPORT_TYPE_FEATURE, report_id, beeper_data, sizeof(beeper_data), parent_->get_report_timeout());
     if (ret == ESP_OK) {
       ESP_LOGI(APC_HID_TAG, "APC beeper muted (current alarms acknowledged) with report ID 0x%02X", report_id);
       return true;
@@ -1728,7 +1728,7 @@ bool ApcHidProtocol::beeper_test() {
   // Step 4: Restore original beeper state
   ESP_LOGI(APC_HID_TAG, "Step 4: Restoring original beeper state: %d", original_state);
   uint8_t restore_data[2] = {APC_REPORT_ID_AUDIBLE_ALARM, original_state};
-  esp_err_t ret = parent_->hid_set_report(HID_REPORT_TYPE_FEATURE, APC_REPORT_ID_AUDIBLE_ALARM, restore_data, sizeof(restore_data), parent_->get_protocol_timeout());
+  esp_err_t ret = parent_->hid_set_report(HID_REPORT_TYPE_FEATURE, APC_REPORT_ID_AUDIBLE_ALARM, restore_data, sizeof(restore_data), parent_->get_report_timeout());
   
   if (ret == ESP_OK) {
     ESP_LOGI(APC_HID_TAG, "APC beeper test sequence completed successfully");
@@ -1761,7 +1761,7 @@ bool ApcHidProtocol::start_battery_test_quick() {
   // Command value 1 = Quick test (based on NUT test_write_info struct)
   uint8_t test_data[2] = {APC_REPORT_ID_TEST_RESULT, test::COMMAND_QUICK};
   
-  esp_err_t ret = parent_->hid_set_report(HID_REPORT_TYPE_FEATURE, APC_REPORT_ID_TEST_RESULT, test_data, sizeof(test_data), parent_->get_protocol_timeout());
+  esp_err_t ret = parent_->hid_set_report(HID_REPORT_TYPE_FEATURE, APC_REPORT_ID_TEST_RESULT, test_data, sizeof(test_data), parent_->get_report_timeout());
   if (ret == ESP_OK) {
     ESP_LOGI(APC_HID_TAG, "APC quick battery test command sent successfully");
     return true;
@@ -1787,7 +1787,7 @@ bool ApcHidProtocol::start_battery_test_deep() {
   // Command value 2 = Deep test (based on NUT test_write_info struct)
   uint8_t test_data[2] = {APC_REPORT_ID_TEST_RESULT, test::COMMAND_DEEP};
   
-  esp_err_t ret = parent_->hid_set_report(HID_REPORT_TYPE_FEATURE, APC_REPORT_ID_TEST_RESULT, test_data, sizeof(test_data), parent_->get_protocol_timeout());
+  esp_err_t ret = parent_->hid_set_report(HID_REPORT_TYPE_FEATURE, APC_REPORT_ID_TEST_RESULT, test_data, sizeof(test_data), parent_->get_report_timeout());
   if (ret == ESP_OK) {
     ESP_LOGI(APC_HID_TAG, "APC deep battery test command sent successfully");
     return true;
@@ -1813,7 +1813,7 @@ bool ApcHidProtocol::stop_battery_test() {
   // Command value 3 = Abort test (based on NUT test_write_info struct)
   uint8_t test_data[2] = {APC_REPORT_ID_TEST_RESULT, test::COMMAND_ABORT};
   
-  esp_err_t ret = parent_->hid_set_report(HID_REPORT_TYPE_FEATURE, APC_REPORT_ID_TEST_RESULT, test_data, sizeof(test_data), parent_->get_protocol_timeout());
+  esp_err_t ret = parent_->hid_set_report(HID_REPORT_TYPE_FEATURE, APC_REPORT_ID_TEST_RESULT, test_data, sizeof(test_data), parent_->get_report_timeout());
   if (ret == ESP_OK) {
     ESP_LOGI(APC_HID_TAG, "APC battery test stop command sent successfully");
     return true;
@@ -1831,7 +1831,7 @@ bool ApcHidProtocol::start_ups_test() {
   // Command value 1 = Start panel test (based on NUT analysis)
   uint8_t test_data[2] = {APC_REPORT_ID_PANEL_TEST, 1};
   
-  esp_err_t ret = parent_->hid_set_report(HID_REPORT_TYPE_FEATURE, APC_REPORT_ID_PANEL_TEST, test_data, sizeof(test_data), parent_->get_protocol_timeout());
+  esp_err_t ret = parent_->hid_set_report(HID_REPORT_TYPE_FEATURE, APC_REPORT_ID_PANEL_TEST, test_data, sizeof(test_data), parent_->get_report_timeout());
   if (ret == ESP_OK) {
     ESP_LOGI(APC_HID_TAG, "APC UPS panel test command sent successfully");
     return true;
@@ -1848,7 +1848,7 @@ bool ApcHidProtocol::stop_ups_test() {
   // Command value 0 = Stop/abort panel test (based on NUT analysis)
   uint8_t test_data[2] = {APC_REPORT_ID_PANEL_TEST, 0};
   
-  esp_err_t ret = parent_->hid_set_report(HID_REPORT_TYPE_FEATURE, APC_REPORT_ID_PANEL_TEST, test_data, sizeof(test_data), parent_->get_protocol_timeout());
+  esp_err_t ret = parent_->hid_set_report(HID_REPORT_TYPE_FEATURE, APC_REPORT_ID_PANEL_TEST, test_data, sizeof(test_data), parent_->get_report_timeout());
   if (ret == ESP_OK) {
     ESP_LOGI(APC_HID_TAG, "APC UPS panel test stop command sent successfully");
     return true;
@@ -2260,7 +2260,7 @@ bool ApcHidProtocol::set_shutdown_delay(int seconds) {
   
   // Attempt SET_REPORT via control transfer (works even on INPUT-ONLY devices sometimes)
   esp_err_t ret = parent_->hid_set_report(HID_REPORT_TYPE_FEATURE, APC_REPORT_ID_DELAY_SHUTDOWN, 
-                                         delay_data, 2, parent_->get_protocol_timeout());
+                                         delay_data, 2, parent_->get_report_timeout());
   
   if (ret == ESP_OK) {
     ESP_LOGI(APC_HID_TAG, "Shutdown delay set successfully to %d seconds", seconds);
@@ -2300,7 +2300,7 @@ bool ApcHidProtocol::set_start_delay(int seconds) {
   
   // Attempt SET_REPORT via control transfer
   esp_err_t ret = parent_->hid_set_report(HID_REPORT_TYPE_FEATURE, APC_REPORT_ID_DELAY_REBOOT, 
-                                         delay_data, 1, parent_->get_protocol_timeout());
+                                         delay_data, 1, parent_->get_report_timeout());
   
   if (ret == ESP_OK) {
     ESP_LOGI(APC_HID_TAG, "Start/reboot delay set successfully to %d seconds", delay_data[0]);

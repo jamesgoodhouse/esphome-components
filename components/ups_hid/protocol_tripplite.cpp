@@ -245,7 +245,7 @@ void TrippLiteProtocol::enumerate_reports() {
         buffer_len = sizeof(buffer);
         esp_err_t ret = parent_->hid_get_report(HID_REPORT_TYPE_FEATURE, id,
                                                  buffer, &buffer_len,
-                                                 parent_->get_protocol_timeout());
+                                                 parent_->get_report_timeout());
         if (ret == ESP_OK && buffer_len > 0) {
             available_feature_reports_.insert(id);
             report_sizes_[id] = buffer_len;
@@ -259,7 +259,7 @@ void TrippLiteProtocol::enumerate_reports() {
         buffer_len = sizeof(buffer);
         ret = parent_->hid_get_report(HID_REPORT_TYPE_INPUT, id,
                                        buffer, &buffer_len,
-                                       parent_->get_protocol_timeout());
+                                       parent_->get_report_timeout());
         if (ret == ESP_OK && buffer_len > 0) {
             available_input_reports_.insert(id);
             if (report_sizes_.find(id) == report_sizes_.end()) {
@@ -283,7 +283,7 @@ void TrippLiteProtocol::enumerate_reports() {
         buffer_len = sizeof(buffer);
         esp_err_t ret = parent_->hid_get_report(HID_REPORT_TYPE_FEATURE, id,
                                                  buffer, &buffer_len,
-                                                 parent_->get_protocol_timeout());
+                                                 parent_->get_report_timeout());
         if (ret == ESP_OK && buffer_len > 0) {
             available_feature_reports_.insert(id);
             if (report_sizes_.find(id) == report_sizes_.end()) {
@@ -299,7 +299,7 @@ void TrippLiteProtocol::enumerate_reports() {
         buffer_len = sizeof(buffer);
         ret = parent_->hid_get_report(HID_REPORT_TYPE_INPUT, id,
                                        buffer, &buffer_len,
-                                       parent_->get_protocol_timeout());
+                                       parent_->get_report_timeout());
         if (ret == ESP_OK && buffer_len > 0) {
             available_input_reports_.insert(id);
             if (report_sizes_.find(id) == report_sizes_.end()) {
@@ -334,7 +334,7 @@ bool TrippLiteProtocol::read_hid_report(uint8_t report_id, HidReport &report) {
         buffer_len = sizeof(buffer);
         ret = parent_->hid_get_report(HID_REPORT_TYPE_FEATURE, report_id,
                                        buffer, &buffer_len,
-                                       parent_->get_protocol_timeout());
+                                       parent_->get_report_timeout());
         if (ret == ESP_OK && buffer_len > 0) {
             report.report_id = report_id;
             report.data.assign(buffer, buffer + buffer_len);
@@ -348,7 +348,7 @@ bool TrippLiteProtocol::read_hid_report(uint8_t report_id, HidReport &report) {
         buffer_len = sizeof(buffer);
         ret = parent_->hid_get_report(HID_REPORT_TYPE_INPUT, report_id,
                                        buffer, &buffer_len,
-                                       parent_->get_protocol_timeout());
+                                       parent_->get_report_timeout());
         if (ret == ESP_OK && buffer_len > 0) {
             report.report_id = report_id;
             report.data.assign(buffer, buffer + buffer_len);
@@ -366,7 +366,7 @@ bool TrippLiteProtocol::write_hid_feature_report(uint8_t report_id, const uint8_
     }
 
     esp_err_t ret = parent_->hid_set_report(HID_REPORT_TYPE_FEATURE, report_id,
-                                             data, len, parent_->get_protocol_timeout());
+                                             data, len, parent_->get_report_timeout());
     if (ret == ESP_OK) {
         ESP_LOGD(TL_TAG, "Wrote Feature report 0x%02X: %zu bytes", report_id, len);
         return true;
