@@ -161,7 +161,8 @@ esp_err_t Esp32UsbTransport::hid_get_report(uint8_t report_type, uint8_t report_
 
     ret = usb_host_transfer_submit_control(device_.client_hdl, transfer);
     if (ret == ESP_OK) {
-        if (xSemaphoreTake(done_sem, pdMS_TO_TICKS(timeout_ms)) == pdTRUE) {
+        TickType_t sem_wait = pdMS_TO_TICKS(timeout_ms + timing::USB_SEMAPHORE_GUARD_MS);
+        if (xSemaphoreTake(done_sem, sem_wait) == pdTRUE) {
             ret = ctx.result;
             if (ret == ESP_OK && ctx.actual_bytes > sizeof(usb_setup_packet_t)) {
                 size_t data_received = ctx.actual_bytes - sizeof(usb_setup_packet_t);
@@ -183,9 +184,13 @@ esp_err_t Esp32UsbTransport::hid_get_report(uint8_t report_type, uint8_t report_
                 ret = ESP_FAIL;
             }
         } else {
-            ESP_LOGW(ESP32_USB_TAG, "HID GET_REPORT timeout (report 0x%02X, %ums)",
-                     report_id, timeout_ms);
-            ret = ESP_ERR_TIMEOUT;
+            // Semaphore timed out AFTER the USB transfer should have completed.
+            // The callback has NOT fired -- the transfer may still be pending.
+            // Intentionally leak the transfer + semaphore to avoid use-after-free.
+            ESP_LOGE(ESP32_USB_TAG, "HID GET_REPORT 0x%02X: semaphore timeout after %ums "
+                     "(USB stack may be stuck, leaking transfer to avoid crash)",
+                     report_id, timeout_ms + timing::USB_SEMAPHORE_GUARD_MS);
+            return ESP_ERR_TIMEOUT;
         }
     } else {
         ESP_LOGW(ESP32_USB_TAG, "Failed to submit HID GET_REPORT 0x%02X: %s",
@@ -268,7 +273,8 @@ esp_err_t Esp32UsbTransport::hid_set_report(uint8_t report_type, uint8_t report_
 
     ret = usb_host_transfer_submit_control(device_.client_hdl, transfer);
     if (ret == ESP_OK) {
-        if (xSemaphoreTake(done_sem, pdMS_TO_TICKS(timeout_ms)) == pdTRUE) {
+        TickType_t sem_wait = pdMS_TO_TICKS(timeout_ms + timing::USB_SEMAPHORE_GUARD_MS);
+        if (xSemaphoreTake(done_sem, sem_wait) == pdTRUE) {
             ret = ctx.result;
             if (ret == ESP_OK) {
                 ESP_LOGD(ESP32_USB_TAG, "HID SET_REPORT success");
@@ -276,8 +282,9 @@ esp_err_t Esp32UsbTransport::hid_set_report(uint8_t report_type, uint8_t report_
                 ESP_LOGW(ESP32_USB_TAG, "HID SET_REPORT failed");
             }
         } else {
-            ESP_LOGW(ESP32_USB_TAG, "HID SET_REPORT timeout");
-            ret = ESP_ERR_TIMEOUT;
+            ESP_LOGE(ESP32_USB_TAG, "HID SET_REPORT 0x%02X: semaphore timeout "
+                     "(leaking transfer to avoid crash)", report_id);
+            return ESP_ERR_TIMEOUT;
         }
     } else {
         ESP_LOGW(ESP32_USB_TAG, "Failed to submit HID SET_REPORT: %s", esp_err_to_name(ret));
@@ -358,36 +365,34 @@ esp_err_t Esp32UsbTransport::get_string_descriptor(uint8_t string_index,
 
     ret = usb_host_transfer_submit_control(device_.client_hdl, transfer);
     if (ret == ESP_OK) {
-        if (xSemaphoreTake(done_sem, pdMS_TO_TICKS(timing::USB_SEMAPHORE_TIMEOUT_MS)) == pdTRUE) {
+        TickType_t sem_wait = pdMS_TO_TICKS(
+            timing::USB_CONTROL_TRANSFER_TIMEOUT_MS + timing::USB_SEMAPHORE_GUARD_MS);
+        if (xSemaphoreTake(done_sem, sem_wait) == pdTRUE) {
             ret = ctx.result;
             if (ret == ESP_OK && ctx.actual_bytes > sizeof(usb_setup_packet_t)) {
-                // Parse the USB string descriptor
                 uint8_t *desc_data = transfer->data_buffer + sizeof(usb_setup_packet_t);
                 size_t desc_len = ctx.actual_bytes - sizeof(usb_setup_packet_t);
 
                 if (desc_len >= 2) {
-                    uint8_t bLength = desc_data[0];        // Total length of descriptor
-                    uint8_t bDescriptorType = desc_data[1]; // Should be USB_B_DESCRIPTOR_TYPE_STRING (0x03)
+                    uint8_t bLength = desc_data[0];
+                    uint8_t bDescriptorType = desc_data[1];
 
                     if (bDescriptorType == USB_B_DESCRIPTOR_TYPE_STRING && bLength >= 2) {
-                        // USB string descriptors are UTF-16LE encoded, skip the 2-byte header
                         size_t string_data_len = std::min(static_cast<size_t>(bLength - 2), desc_len - 2);
                         uint8_t *string_data = desc_data + 2;
 
-                        // Convert UTF-16LE to ASCII (simplified, handles ASCII characters)
                         result.reserve(string_data_len / 2);
                         for (size_t i = 0; i < string_data_len; i += 2) {
                             if (i + 1 < string_data_len) {
                                 uint16_t utf16_char = string_data[i] | (string_data[i + 1] << 8);
-                                if (utf16_char < 128 && utf16_char > 0) { // ASCII range, non-null
+                                if (utf16_char < 128 && utf16_char > 0) {
                                     result += static_cast<char>(utf16_char);
                                 } else if (utf16_char >= 128) {
-                                    result += '?'; // Non-ASCII character placeholder
+                                    result += '?';
                                 }
                             }
                         }
 
-                        // Trim trailing whitespace
                         while (!result.empty() && std::isspace(result.back())) {
                             result.pop_back();
                         }
@@ -406,8 +411,9 @@ esp_err_t Esp32UsbTransport::get_string_descriptor(uint8_t string_index,
                 ret = ESP_FAIL;
             }
         } else {
-            ESP_LOGW(ESP32_USB_TAG, "USB string descriptor request timeout");
-            ret = ESP_ERR_TIMEOUT;
+            ESP_LOGE(ESP32_USB_TAG, "String descriptor: semaphore timeout "
+                     "(leaking transfer to avoid crash)");
+            return ESP_ERR_TIMEOUT;
         }
     } else {
         ESP_LOGW(ESP32_USB_TAG, "Failed to submit string descriptor request: %s", esp_err_to_name(ret));
@@ -543,7 +549,9 @@ esp_err_t Esp32UsbTransport::get_hid_report_descriptor(std::vector<uint8_t>& des
 
     ret = usb_host_transfer_submit_control(device_.client_hdl, transfer);
     if (ret == ESP_OK) {
-        if (xSemaphoreTake(done_sem, pdMS_TO_TICKS(timing::USB_SEMAPHORE_TIMEOUT_MS)) == pdTRUE) {
+        TickType_t sem_wait = pdMS_TO_TICKS(
+            timing::USB_CONTROL_TRANSFER_TIMEOUT_MS + timing::USB_SEMAPHORE_GUARD_MS);
+        if (xSemaphoreTake(done_sem, sem_wait) == pdTRUE) {
             ret = ctx.result;
             if (ret == ESP_OK && ctx.actual_bytes > sizeof(usb_setup_packet_t)) {
                 size_t desc_len = ctx.actual_bytes - sizeof(usb_setup_packet_t);
@@ -555,8 +563,9 @@ esp_err_t Esp32UsbTransport::get_hid_report_descriptor(std::vector<uint8_t>& des
                 ret = ESP_FAIL;
             }
         } else {
-            ESP_LOGW(ESP32_USB_TAG, "HID report descriptor request timeout");
-            ret = ESP_ERR_TIMEOUT;
+            ESP_LOGE(ESP32_USB_TAG, "Report descriptor: semaphore timeout "
+                     "(leaking transfer to avoid crash)");
+            return ESP_ERR_TIMEOUT;
         }
     } else {
         ESP_LOGW(ESP32_USB_TAG, "Failed to submit report descriptor request: %s", esp_err_to_name(ret));

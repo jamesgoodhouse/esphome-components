@@ -181,8 +181,10 @@ namespace esphome
       TaskHandle_t usb_read_task_handle_{nullptr};
       std::atomic<bool> new_data_available_{false};
       std::atomic<bool> usb_task_running_{false};
+      std::atomic<uint32_t> usb_task_heartbeat_{0};
       static void usb_read_task(void *param);
       void usb_read_loop();
+      void check_task_health();
 
       // Fast polling for timer countdown
       bool fast_polling_mode_{false};

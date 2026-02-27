@@ -77,11 +77,45 @@ void UpsHidComponent::setup() {
 void UpsHidComponent::update() {
   // update() runs on ESPHome's main loop -- never blocks on USB.
   // The background task does all USB I/O and sets new_data_available_.
+  check_task_health();
+
   if (new_data_available_.exchange(false)) {
     update_sensors();
     check_state_changes();
     check_and_update_timers();
   }
+}
+
+void UpsHidComponent::check_task_health() {
+  if (!usb_task_running_.load()) return;
+
+  uint32_t hb = usb_task_heartbeat_.load();
+  if (hb == 0) return;  // Task hasn't started its first iteration yet
+
+  uint32_t age = millis() - hb;
+  // Allow generous time: protocol timeout can be 10-15s per report, and a
+  // full read cycle touches ~55 reports.  60 seconds without a heartbeat
+  // means the task is stuck or dead.
+  static constexpr uint32_t TASK_HEALTH_TIMEOUT_MS = 60000;
+  if (age < TASK_HEALTH_TIMEOUT_MS) return;
+
+  ESP_LOGE(TAG, "USB read task heartbeat stale (%ums ago) - task appears dead, restarting",
+           age);
+
+  // Clean up the old task handle if possible
+  if (usb_read_task_handle_) {
+    vTaskDelete(usb_read_task_handle_);
+    usb_read_task_handle_ = nullptr;
+  }
+
+  // Reset state so the new task starts fresh
+  active_protocol_.reset();
+  report_map_.reset();
+  consecutive_failures_ = 0;
+  usb_task_heartbeat_.store(0);
+
+  xTaskCreate(usb_read_task, "ups_usb_read", 8192, this, 1, &usb_read_task_handle_);
+  ESP_LOGI(TAG, "USB read task restarted");
 }
 
 void UpsHidComponent::usb_read_task(void *param) {
@@ -92,6 +126,7 @@ void UpsHidComponent::usb_read_task(void *param) {
 
 void UpsHidComponent::usb_read_loop() {
   while (usb_task_running_.load()) {
+    usb_task_heartbeat_.store(millis());
     uint32_t interval = get_update_interval();
 
     if (!transport_ || !transport_->is_connected()) {
