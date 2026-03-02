@@ -90,43 +90,29 @@ void UpsHidComponent::check_task_health() {
   if (!usb_task_running_.load()) return;
 
   uint32_t hb = usb_task_heartbeat_.load();
-  if (hb == 0) return;  // Task hasn't started its first iteration yet
+  if (hb == 0) return;
 
   uint32_t age = millis() - hb;
   static constexpr uint32_t TASK_HEALTH_TIMEOUT_MS = 60000;
   if (age < TASK_HEALTH_TIMEOUT_MS) return;
 
-  ESP_LOGE(TAG, "USB read task heartbeat stale (%ums ago) - task is hung or dead",
-           age);
+  ESP_LOGE(TAG, "USB read task heartbeat stale (%ums ago) - task is hung or dead", age);
 
-  // Kill the hung read task
-  if (usb_read_task_handle_) {
-    vTaskDelete(usb_read_task_handle_);
-    usb_read_task_handle_ = nullptr;
-  }
-
-  // Reset protocol state
-  active_protocol_.reset();
-  report_map_.reset();
-  consecutive_failures_ = 0;
+  // Bump the generation so the old task knows it has been superseded and
+  // will exit on its next loop iteration (if it ever unblocks).
+  // Do NOT call vTaskDelete(otherTask) -- that corrupts FreeRTOS state if
+  // the task is blocked inside a kernel call (xSemaphoreTake, etc.).
+  usb_task_generation_.fetch_add(1);
   usb_task_heartbeat_.store(0);
+  consecutive_failures_ = 0;
 
-  // The USB client/lib tasks may also be dead or corrupted (the most common
-  // cause of a hung read task is a use-after-free that killed the client
-  // task, so callbacks stop being delivered).  Tear down and rebuild the
-  // entire transport to get fresh USB host tasks.
-  if (transport_) {
-    ESP_LOGW(TAG, "Reinitializing USB transport as part of recovery");
-    transport_->deinitialize();
-    esp_err_t ret = transport_->initialize();
-    if (ret != ESP_OK) {
-      ESP_LOGE(TAG, "Transport reinitialization failed: %s",
-               transport_->get_last_error().c_str());
-    }
-  }
+  // Signal the new task to reinitialize the transport (the USB client/lib
+  // tasks may be dead too).  We do NOT do the reinit here because
+  // deinitialize() blocks and would starve the main-loop watchdog.
+  transport_needs_reinit_.store(true);
 
   xTaskCreate(usb_read_task, "ups_usb_read", 8192, this, 1, &usb_read_task_handle_);
-  ESP_LOGI(TAG, "USB read task restarted with fresh transport");
+  ESP_LOGI(TAG, "New USB read task spawned (old task abandoned)");
 }
 
 void UpsHidComponent::usb_read_task(void *param) {
@@ -136,7 +122,35 @@ void UpsHidComponent::usb_read_task(void *param) {
 }
 
 void UpsHidComponent::usb_read_loop() {
+  const uint32_t my_generation = usb_task_generation_.load();
+
+  // If flagged by check_task_health(), reinitialize transport before starting.
+  // This runs in the background task so it won't starve the main-loop watchdog.
+  if (transport_needs_reinit_.exchange(false)) {
+    ESP_LOGW(TAG, "Reinitializing USB transport (recovery from hung task)");
+    active_protocol_.reset();
+    report_map_.reset();
+    if (transport_) {
+      transport_->deinitialize();
+      vTaskDelay(pdMS_TO_TICKS(1000));
+      esp_err_t ret = transport_->initialize();
+      if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Transport reinitialization failed: %s",
+                 transport_->get_last_error().c_str());
+      } else {
+        ESP_LOGI(TAG, "Transport reinitialized successfully");
+      }
+    }
+  }
+
   while (usb_task_running_.load()) {
+    // If a newer task has been spawned, this task is superseded -- exit cleanly.
+    if (usb_task_generation_.load() != my_generation) {
+      ESP_LOGI(TAG, "USB read task (gen %u) superseded by gen %u, exiting",
+               my_generation, usb_task_generation_.load());
+      return;
+    }
+
     usb_task_heartbeat_.store(millis());
     uint32_t interval = get_update_interval();
 
@@ -157,7 +171,6 @@ void UpsHidComponent::usb_read_loop() {
         ESP_LOGW(TAG, log_messages::DETECTION_FAILED, consecutive_failures_);
 
         // After 10 consecutive detection failures, reinitialize the USB transport
-        // to recover from stale handles or broken USB pipe state
         static constexpr uint32_t TRANSPORT_RESET_THRESHOLD = 10;
         if (consecutive_failures_ > 0 &&
             consecutive_failures_ % TRANSPORT_RESET_THRESHOLD == 0) {
@@ -185,7 +198,10 @@ void UpsHidComponent::usb_read_loop() {
       }
     }
 
-    // Read data (this is the slow USB I/O part)
+    // Read data (this is the slow USB I/O part -- can take seconds if reports
+    // are timing out).  Update heartbeat before and after so check_task_health()
+    // doesn't think we're dead during a long read cycle.
+    usb_task_heartbeat_.store(millis());
     if (read_ups_data()) {
       new_data_available_.store(true);
       consecutive_failures_ = 0;
@@ -262,6 +278,8 @@ esp_err_t UpsHidComponent::hid_get_report(uint8_t report_type, uint8_t report_id
   if (!transport_) {
     return ESP_ERR_INVALID_STATE;
   }
+  // Keep heartbeat alive during long read cycles (many reports back-to-back)
+  usb_task_heartbeat_.store(millis());
   return transport_->hid_get_report(report_type, report_id, data, data_len, timeout_ms);
 }
 

@@ -184,6 +184,8 @@ namespace esphome
       std::atomic<bool> new_data_available_{false};
       std::atomic<bool> usb_task_running_{false};
       std::atomic<uint32_t> usb_task_heartbeat_{0};
+      std::atomic<uint32_t> usb_task_generation_{0};
+      std::atomic<bool> transport_needs_reinit_{false};
       static void usb_read_task(void *param);
       void usb_read_loop();
       void check_task_health();
