@@ -89,14 +89,29 @@ void UpsHidComponent::update() {
 void UpsHidComponent::check_task_health() {
   if (!usb_task_running_.load()) return;
 
+  uint32_t now = millis();
+
+  // Check 1: Is the task loop itself alive?
   uint32_t hb = usb_task_heartbeat_.load();
-  if (hb == 0) return;
+  bool task_hung = (hb != 0) && (now - hb > 60000);
 
-  uint32_t age = millis() - hb;
-  static constexpr uint32_t TASK_HEALTH_TIMEOUT_MS = 60000;
-  if (age < TASK_HEALTH_TIMEOUT_MS) return;
+  // Check 2: Is the task alive but not producing data?
+  // This catches the case where the task is looping in "waiting for device"
+  // (heartbeat updates, but last_successful_read_ never advances).
+  bool data_stale = false;
+  if (!task_hung && last_successful_read_ > 0) {
+    data_stale = (now - last_successful_read_) > DATA_STALE_TIMEOUT_MS;
+  }
 
-  ESP_LOGE(TAG, "USB read task heartbeat stale (%ums ago) - task is hung or dead", age);
+  if (!task_hung && !data_stale) return;
+
+  if (task_hung) {
+    ESP_LOGE(TAG, "USB read task heartbeat stale (%ums) - task is hung or dead",
+             now - hb);
+  } else {
+    ESP_LOGE(TAG, "No successful data read for %us - transport may need recovery",
+             (now - last_successful_read_) / 1000);
+  }
 
   // Bump the generation so the old task knows it has been superseded and
   // will exit on its next loop iteration (if it ever unblocks).
@@ -105,6 +120,7 @@ void UpsHidComponent::check_task_health() {
   usb_task_generation_.fetch_add(1);
   usb_task_heartbeat_.store(0);
   consecutive_failures_ = 0;
+  last_successful_read_ = 0;
 
   // Signal the new task to reinitialize the transport (the USB client/lib
   // tasks may be dead too).  We do NOT do the reinit here because
@@ -112,7 +128,7 @@ void UpsHidComponent::check_task_health() {
   transport_needs_reinit_.store(true);
 
   xTaskCreate(usb_read_task, "ups_usb_read", 8192, this, 1, &usb_read_task_handle_);
-  ESP_LOGI(TAG, "New USB read task spawned (old task abandoned)");
+  ESP_LOGI(TAG, "New USB read task spawned (old task abandoned, transport reinit pending)");
 }
 
 void UpsHidComponent::usb_read_task(void *param) {
@@ -151,11 +167,19 @@ void UpsHidComponent::usb_read_loop() {
       return;
     }
 
-    usb_task_heartbeat_.store(millis());
+    uint32_t now = millis();
+    usb_task_heartbeat_.store(now);
     uint32_t interval = get_update_interval();
 
     if (!transport_ || !transport_->is_connected()) {
-      ESP_LOGD(TAG, log_messages::WAITING_FOR_DEVICE);
+      // Log at WARN every 30s so this state is visible, not hidden at DEBUG
+      static uint32_t last_waiting_log = 0;
+      if (now - last_waiting_log > 30000) {
+        ESP_LOGW(TAG, "Waiting for USB device (transport %s, connected: %s)",
+                 transport_ ? "present" : "null",
+                 transport_ ? (transport_->is_connected() ? "yes" : "no") : "n/a");
+        last_waiting_log = now;
+      }
       vTaskDelay(pdMS_TO_TICKS(interval));
       continue;
     }
