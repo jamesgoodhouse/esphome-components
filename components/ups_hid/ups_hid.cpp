@@ -90,18 +90,15 @@ void UpsHidComponent::check_task_health() {
   if (!usb_task_running_.load()) return;
 
   uint32_t now = millis();
-
-  // Check 1: Is the task loop itself alive?
   uint32_t hb = usb_task_heartbeat_.load();
+
+  // Check 1: task heartbeat stale (task is blocked in a USB/FreeRTOS call)
   bool task_hung = (hb != 0) && (now - hb > 60000);
 
-  // Check 2: Is the task alive but not producing data?
-  // This catches the case where the task is looping in "waiting for device"
-  // (heartbeat updates, but last_successful_read_ never advances).
-  bool data_stale = false;
-  if (!task_hung && last_successful_read_ > 0) {
-    data_stale = (now - last_successful_read_) > DATA_STALE_TIMEOUT_MS;
-  }
+  // Check 2: task is alive (heartbeat fresh) but data stopped flowing.
+  // Covers: looping in "waiting for device", endless detection failures, etc.
+  bool data_stale = !task_hung && (last_successful_read_ > 0) &&
+                    (now - last_successful_read_) > DATA_STALE_TIMEOUT_MS;
 
   if (!task_hung && !data_stale) return;
 
@@ -113,22 +110,25 @@ void UpsHidComponent::check_task_health() {
              (now - last_successful_read_) / 1000);
   }
 
-  // Bump the generation so the old task knows it has been superseded and
-  // will exit on its next loop iteration (if it ever unblocks).
-  // Do NOT call vTaskDelete(otherTask) -- that corrupts FreeRTOS state if
-  // the task is blocked inside a kernel call (xSemaphoreTake, etc.).
+  // If this is the 3rd consecutive recovery attempt without any successful
+  // read, the USB stack is unrecoverable. Reboot the ESP.
+  recovery_attempts_++;
+  if (recovery_attempts_ >= 3) {
+    ESP_LOGE(TAG, "USB recovery failed %u times, rebooting ESP", recovery_attempts_);
+    delay(100);  // Let the log message flush
+    App.safe_reboot();
+    return;
+  }
+
   usb_task_generation_.fetch_add(1);
   usb_task_heartbeat_.store(0);
   consecutive_failures_ = 0;
-  last_successful_read_ = 0;
+  last_successful_read_ = now;  // give the new task 60s before we check again
 
-  // Signal the new task to reinitialize the transport (the USB client/lib
-  // tasks may be dead too).  We do NOT do the reinit here because
-  // deinitialize() blocks and would starve the main-loop watchdog.
   transport_needs_reinit_.store(true);
 
   xTaskCreate(usb_read_task, "ups_usb_read", 8192, this, 1, &usb_read_task_handle_);
-  ESP_LOGI(TAG, "New USB read task spawned (old task abandoned, transport reinit pending)");
+  ESP_LOGI(TAG, "Recovery attempt %u: new USB read task spawned", recovery_attempts_);
 }
 
 void UpsHidComponent::usb_read_task(void *param) {
@@ -139,6 +139,10 @@ void UpsHidComponent::usb_read_task(void *param) {
 
 void UpsHidComponent::usb_read_loop() {
   const uint32_t my_generation = usb_task_generation_.load();
+
+  // Set heartbeat immediately so check_task_health() can detect if we get
+  // stuck during transport reinit (before the main while loop).
+  usb_task_heartbeat_.store(millis());
 
   // If flagged by check_task_health(), reinitialize transport before starting.
   // This runs in the background task so it won't starve the main-loop watchdog.
@@ -230,6 +234,7 @@ void UpsHidComponent::usb_read_loop() {
       new_data_available_.store(true);
       consecutive_failures_ = 0;
       last_successful_read_ = millis();
+      recovery_attempts_ = 0;
     } else {
       consecutive_failures_++;
       ESP_LOGW(TAG, log_messages::READ_FAILED, consecutive_failures_);
