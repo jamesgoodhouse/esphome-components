@@ -53,16 +53,20 @@ esp_err_t Esp32UsbTransport::initialize() {
 }
 
 esp_err_t Esp32UsbTransport::deinitialize() {
-    std::lock_guard<std::mutex> lock(device_mutex_);
-
     if (!initialized_.load()) {
         return ESP_OK;
     }
 
     ESP_LOGI(ESP32_USB_TAG, "Deinitializing ESP32 USB transport");
 
-    connected_ = false;
+    // Signal callbacks BEFORE taking the mutex so handle_device_gone() and
+    // handle_new_device() bail out immediately instead of blocking.
     initialized_ = false;
+    connected_ = false;
+
+    std::lock_guard<std::mutex> lock(device_mutex_);
+
+    device_gone_pending_ = false;
 
     esp_err_t ret = teardown_usb_host();
     if (ret != ESP_OK) {
@@ -89,20 +93,23 @@ uint16_t Esp32UsbTransport::get_product_id() const {
 esp_err_t Esp32UsbTransport::hid_get_report(uint8_t report_type, uint8_t report_id,
                                            uint8_t* data, size_t* data_len,
                                            uint32_t timeout_ms) {
+    std::lock_guard<std::mutex> lock(device_mutex_);
+
+    if (device_gone_pending_.load()) {
+        process_device_gone_locked();
+        return ESP_ERR_INVALID_STATE;
+    }
     if (!device_.dev_hdl) {
-        ESP_LOGE(ESP32_USB_TAG, "HID GET_REPORT: No device handle");
-        return ESP_ERR_INVALID_ARG;
+        return ESP_ERR_INVALID_STATE;
     }
     if (!data || !data_len || *data_len == 0) {
-        ESP_LOGE(ESP32_USB_TAG, "HID GET_REPORT: Invalid parameters");
         return ESP_ERR_INVALID_ARG;
     }
 
     ESP_LOGD(ESP32_USB_TAG, "HID GET_REPORT: type=0x%02X, id=0x%02X, max_len=%zu",
              report_type, report_id, *data_len);
 
-    // Use fixed buffer sizes like working implementation
-    uint8_t buffer[64] = {0}; // Fixed size buffer
+    uint8_t buffer[64] = {0};
     size_t expected_len = std::min(*data_len, sizeof(buffer));
 
     // Create USB control transfer for HID GET_REPORT
@@ -199,18 +206,27 @@ esp_err_t Esp32UsbTransport::hid_get_report(uint8_t report_type, uint8_t report_
 
     vSemaphoreDelete(done_sem);
     usb_host_transfer_free(transfer);
+
+    if (device_gone_pending_.load()) {
+        process_device_gone_locked();
+    }
+
     return ret;
 }
 
 esp_err_t Esp32UsbTransport::hid_set_report(uint8_t report_type, uint8_t report_id,
                                            const uint8_t* data, size_t data_len,
                                            uint32_t timeout_ms) {
+    std::lock_guard<std::mutex> lock(device_mutex_);
+
+    if (device_gone_pending_.load()) {
+        process_device_gone_locked();
+        return ESP_ERR_INVALID_STATE;
+    }
     if (!device_.dev_hdl) {
-        ESP_LOGE(ESP32_USB_TAG, "HID SET_REPORT: No device handle");
-        return ESP_ERR_INVALID_ARG;
+        return ESP_ERR_INVALID_STATE;
     }
     if (!data || data_len == 0) {
-        ESP_LOGE(ESP32_USB_TAG, "HID SET_REPORT: Invalid parameters");
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -292,13 +308,24 @@ esp_err_t Esp32UsbTransport::hid_set_report(uint8_t report_type, uint8_t report_
 
     vSemaphoreDelete(done_sem);
     usb_host_transfer_free(transfer);
+
+    if (device_gone_pending_.load()) {
+        process_device_gone_locked();
+    }
+
     return ret;
 }
 
 esp_err_t Esp32UsbTransport::get_string_descriptor(uint8_t string_index,
                                                  std::string& result) {
     result.clear();
+    std::lock_guard<std::mutex> lock(device_mutex_);
 
+    if (device_gone_pending_.load()) {
+        process_device_gone_locked();
+        set_last_error("USB device disconnected");
+        return ESP_ERR_INVALID_STATE;
+    }
     if (!device_.dev_hdl) {
         set_last_error("USB device not ready");
         return ESP_ERR_INVALID_STATE;
@@ -421,12 +448,23 @@ esp_err_t Esp32UsbTransport::get_string_descriptor(uint8_t string_index,
 
     vSemaphoreDelete(done_sem);
     usb_host_transfer_free(transfer);
+
+    if (device_gone_pending_.load()) {
+        process_device_gone_locked();
+    }
+
     return ret;
 }
 
 esp_err_t Esp32UsbTransport::get_hid_report_descriptor(std::vector<uint8_t>& descriptor) {
     descriptor.clear();
+    std::lock_guard<std::mutex> lock(device_mutex_);
 
+    if (device_gone_pending_.load()) {
+        process_device_gone_locked();
+        set_last_error("USB device disconnected");
+        return ESP_ERR_INVALID_STATE;
+    }
     if (!device_.dev_hdl) {
         set_last_error("USB device not ready for report descriptor fetch");
         return ESP_ERR_INVALID_STATE;
@@ -573,6 +611,11 @@ esp_err_t Esp32UsbTransport::get_hid_report_descriptor(std::vector<uint8_t>& des
 
     vSemaphoreDelete(done_sem);
     usb_host_transfer_free(transfer);
+
+    if (device_gone_pending_.load()) {
+        process_device_gone_locked();
+    }
+
     return ret;
 }
 
@@ -683,7 +726,7 @@ esp_err_t Esp32UsbTransport::find_and_open_device() {
         ESP_LOGI(ESP32_USB_TAG, "Found %d existing USB devices during initial enumeration:", num_dev);
         for (int i = 0; i < num_dev; i++) {
             ESP_LOGI(ESP32_USB_TAG, "  Attempting to handle existing device at address %d", dev_addr_list[i]);
-            handle_new_device(dev_addr_list[i]);
+            handle_new_device_locked(dev_addr_list[i]);
         }
     } else {
         ESP_LOGI(ESP32_USB_TAG, "No existing USB devices found - waiting for connection events");
@@ -792,6 +835,10 @@ esp_err_t Esp32UsbTransport::submit_control_transfer(uint8_t bmRequestType, uint
                                                    uint32_t timeout_ms) {
     std::lock_guard<std::mutex> lock(device_mutex_);
 
+    if (device_gone_pending_.load()) {
+        process_device_gone_locked();
+        return ESP_ERR_INVALID_STATE;
+    }
     if (!device_.dev_hdl) {
         return ESP_ERR_INVALID_STATE;
     }
@@ -865,17 +912,20 @@ void Esp32UsbTransport::usb_client_event_callback(const usb_host_client_event_ms
 }
 
 void Esp32UsbTransport::handle_new_device(uint8_t dev_addr) {
-    ESP_LOGI(ESP32_USB_TAG, "Handling new USB device at address %d", dev_addr);
+    if (!initialized_.load()) return;
 
     std::lock_guard<std::mutex> lock(device_mutex_);
+    handle_new_device_locked(dev_addr);
+}
 
-    // Check if we already have a device connected
+void Esp32UsbTransport::handle_new_device_locked(uint8_t dev_addr) {
+    ESP_LOGI(ESP32_USB_TAG, "Handling new USB device at address %d", dev_addr);
+
     if (device_.dev_hdl != nullptr) {
         ESP_LOGW(ESP32_USB_TAG, "Device already connected - skipping new device at address %d", dev_addr);
         return;
     }
 
-    // Open the device
     esp_err_t ret = usb_host_device_open(device_.client_hdl, dev_addr, &device_.dev_hdl);
     if (ret != ESP_OK) {
         ESP_LOGE(ESP32_USB_TAG, "Failed to open device at address %d: %s", dev_addr, esp_err_to_name(ret));
@@ -884,7 +934,6 @@ void Esp32UsbTransport::handle_new_device(uint8_t dev_addr) {
 
     ESP_LOGI(ESP32_USB_TAG, "Successfully opened USB device at address %d", dev_addr);
 
-    // Get device information
     usb_device_info_t dev_info;
     ret = usb_host_device_info(device_.dev_hdl, &dev_info);
     if (ret != ESP_OK) {
@@ -897,7 +946,6 @@ void Esp32UsbTransport::handle_new_device(uint8_t dev_addr) {
     device_.address = dev_addr;
     device_.speed = dev_info.speed;
 
-    // Get device descriptor to extract VID/PID
     const usb_device_desc_t* device_desc;
     ret = usb_host_get_device_descriptor(device_.dev_hdl, &device_desc);
     if (ret == ESP_OK) {
@@ -907,16 +955,15 @@ void Esp32UsbTransport::handle_new_device(uint8_t dev_addr) {
         ESP_LOGI(ESP32_USB_TAG, "USB device opened: VID=0x%04X, PID=0x%04X, Speed=%d",
                  device_.vendor_id, device_.product_id, dev_info.speed);
 
-        // Check if this is a UPS device (HID class)
         if (device_desc->bDeviceClass == USB_CLASS_HID ||
-            device_desc->bDeviceClass == 0x00) { // Device class defined at interface level
+            device_desc->bDeviceClass == 0x00) {
 
-            // Try to claim HID interface and find endpoints
             ret = claim_interface();
             if (ret == ESP_OK) {
                 ret = find_endpoints();
                 if (ret == ESP_OK) {
                     connected_ = true;
+                    device_gone_pending_ = false;
                     ESP_LOGI(ESP32_USB_TAG, "UPS device successfully configured and ready");
                     return;
                 }
@@ -926,33 +973,44 @@ void Esp32UsbTransport::handle_new_device(uint8_t dev_addr) {
         }
     }
 
-    // Clean up on failure
     usb_host_device_close(device_.client_hdl, device_.dev_hdl);
     device_.dev_hdl = nullptr;
 }
 
 void Esp32UsbTransport::handle_device_gone(usb_device_handle_t dev_hdl) {
-    ESP_LOGI(ESP32_USB_TAG, "Handling USB device disconnection");
+    // Mark disconnected immediately (atomic, always safe).
+    connected_ = false;
 
-    std::lock_guard<std::mutex> lock(device_mutex_);
-
-    if (device_.dev_hdl == dev_hdl) {
-        connected_ = false;
-
-        // Clean up device resources
-        if (device_.dev_hdl) {
-            usb_host_interface_release(device_.client_hdl, device_.dev_hdl, device_.interface_num);
-            usb_host_device_close(device_.client_hdl, device_.dev_hdl);
-            device_.dev_hdl = nullptr;
-        }
-
-        // Reset device info
-        device_.address = 0;
-        device_.vendor_id = 0;
-        device_.product_id = 0;
-
-        ESP_LOGI(ESP32_USB_TAG, "USB device disconnected and cleaned up");
+    // Try to acquire the mutex for immediate cleanup.  If the mutex is held
+    // (a transfer function is in-flight, or deinitialize is running), we must
+    // NOT block -- that would deadlock the USB client task.  Instead, set
+    // device_gone_pending_ so the mutex holder does the cleanup when done.
+    std::unique_lock<std::mutex> lock(device_mutex_, std::try_to_lock);
+    if (!lock.owns_lock()) {
+        device_gone_pending_ = true;
+        ESP_LOGI(ESP32_USB_TAG, "USB device disconnected (deferred cleanup)");
+        return;
     }
+
+    ESP_LOGI(ESP32_USB_TAG, "USB device disconnected");
+    process_device_gone_locked();
+}
+
+void Esp32UsbTransport::process_device_gone_locked() {
+    device_gone_pending_ = false;
+
+    if (device_.dev_hdl) {
+        usb_host_interface_release(device_.client_hdl, device_.dev_hdl, device_.interface_num);
+        usb_host_device_close(device_.client_hdl, device_.dev_hdl);
+        device_.dev_hdl = nullptr;
+    }
+
+    device_.address = 0;
+    device_.vendor_id = 0;
+    device_.product_id = 0;
+    connected_ = false;
+
+    ESP_LOGI(ESP32_USB_TAG, "USB device resources cleaned up");
 }
 
 void Esp32UsbTransport::usb_lib_task(void* arg) {

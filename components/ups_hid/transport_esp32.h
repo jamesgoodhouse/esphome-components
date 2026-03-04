@@ -70,6 +70,10 @@ private:
     std::atomic<bool> connected_{false};
     std::atomic<bool> initialized_{false};
 
+    // Set by handle_device_gone() when it can't acquire device_mutex_.
+    // The next transfer function (which holds the mutex) will do the cleanup.
+    std::atomic<bool> device_gone_pending_{false};
+
     // USB Host Library management
     TaskHandle_t usb_lib_task_handle_{nullptr};
     TaskHandle_t usb_client_task_handle_{nullptr};
@@ -85,7 +89,9 @@ private:
     static void usb_client_event_callback(const usb_host_client_event_msg_t* event_msg, void* arg);
 
     void handle_new_device(uint8_t dev_addr);
+    void handle_new_device_locked(uint8_t dev_addr);
     void handle_device_gone(usb_device_handle_t dev_hdl);
+    void process_device_gone_locked();
 
     esp_err_t setup_usb_host();
     esp_err_t teardown_usb_host();
