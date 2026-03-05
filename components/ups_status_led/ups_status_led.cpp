@@ -60,13 +60,10 @@ void UpsStatusLedComponent::setup() {
 }
 
 void UpsStatusLedComponent::loop() {
-  static bool first_evaluation = true;
-  static uint32_t startup_delay = 0;
-  
-  if (first_evaluation) {
+  if (first_evaluation_) {
     ESP_LOGI(TAG, "*** UPS STATUS LED FIRST LOOP - COMPONENT IS RUNNING ***");
-    startup_delay = millis() + 2000;  // 2 second startup delay for UPS initialization
-    first_evaluation = false;
+    startup_delay_ = millis() + 2000;
+    first_evaluation_ = false;
   }
   
   uint32_t now = millis();
@@ -76,26 +73,25 @@ void UpsStatusLedComponent::loop() {
   
   // Handle disabled state properly (don't interfere with startup delay)
   if (!enabled_) {
-    // Only turn off LED if we're past startup or if we've already started
-    if (startup_delay == 0 || now >= startup_delay) {
+    if (startup_delay_ == 0 || now >= startup_delay_) {
       ESP_LOGD(TAG, "LED disabled - turning off");
       set_led_color(0, 0, 0, 0);
-      startup_delay = 0;  // Clear startup delay
+      startup_delay_ = 0;
       force_update_ = false;  // Clear flag
     }
     return;
   }
   
   // Wait for startup delay to complete
-  if (startup_delay > 0 && now < startup_delay) {
+  if (startup_delay_ > 0 && now < startup_delay_) {
     return;
   }
   
   // Clear startup delay after waiting
   bool startup_complete = false;
-  if (startup_delay > 0) {
+  if (startup_delay_ > 0) {
     startup_complete = true;
-    startup_delay = 0;
+    startup_delay_ = 0;
     force_update_ = true;  // Force first update after startup delay
     ESP_LOGI(TAG, "LED startup delay complete - forcing initial pattern evaluation");
   }
@@ -121,9 +117,7 @@ void UpsStatusLedComponent::loop() {
     last_update_ = now;
   }
   
-  // Update Home Assistant entities periodically
-  static uint32_t last_ha_update = 0;
-  if (now - last_ha_update > 1000) {  // Update every second
+  if (now - last_ha_update_ > 1000) {
 #ifdef USE_TEXT_SENSOR
     if (status_text_sensor_) {
       std::string pattern_name;
@@ -142,7 +136,7 @@ void UpsStatusLedComponent::loop() {
       }
     }
 #endif
-    last_ha_update = now;
+    last_ha_update_ = now;
   }
 }
 

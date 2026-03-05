@@ -1049,9 +1049,12 @@ void Esp32UsbTransport::handle_device_gone(usb_device_handle_t dev_hdl) {
 void Esp32UsbTransport::process_device_gone_locked() {
     device_gone_pending_ = false;
 
-    if (device_.dev_hdl) {
+    if (device_.dev_hdl && device_.client_hdl) {
         usb_host_interface_release(device_.client_hdl, device_.dev_hdl, device_.interface_num);
         usb_host_device_close(device_.client_hdl, device_.dev_hdl);
+        device_.dev_hdl = nullptr;
+    } else if (device_.dev_hdl) {
+        ESP_LOGW(ESP32_USB_TAG, "Device handle present but client handle is null, skipping USB cleanup");
         device_.dev_hdl = nullptr;
     }
 

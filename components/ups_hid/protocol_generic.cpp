@@ -1155,36 +1155,33 @@ float GenericHidProtocol::parse_frequency_from_report(uint8_t *data, size_t len)
 // Delay configuration methods
 bool GenericHidProtocol::set_shutdown_delay(int seconds)
 {
-  ESP_LOGI(TAG, "Setting shutdown delay to %d seconds (Generic HID)", seconds);
+  ESP_LOGI(GEN_TAG, "Setting shutdown delay to %d seconds (Generic HID)", seconds);
 
-  // Validate range (0-7200 seconds = 0-2 hours)
   if (seconds < 0 || seconds > 7200)
   {
-    ESP_LOGW(TAG, "Shutdown delay %d seconds out of range (0-7200)", seconds);
+    ESP_LOGW(GEN_TAG, "Shutdown delay %d seconds out of range (0-7200)", seconds);
     return false;
   }
 
-  // Try common report IDs for delay configuration
-  // Different vendors use different report IDs, so we'll try the most common ones
   const std::vector<uint8_t> delay_report_ids = {
-      HID_USAGE_POW_DELAY_BEFORE_SHUTDOWN, // Standard HID usage
+      HID_USAGE_POW_DELAY_BEFORE_SHUTDOWN,
   };
 
   bool success = false;
   for (uint8_t report_id : delay_report_ids)
   {
     uint8_t delay_data[2];
-    delay_data[0] = seconds & 0xFF;        // Low byte
-    delay_data[1] = (seconds >> 8) & 0xFF; // High byte
+    delay_data[0] = seconds & 0xFF;
+    delay_data[1] = (seconds >> 8) & 0xFF;
 
-    ESP_LOGD(TAG, "Trying shutdown delay on report 0x%02X: %d seconds", report_id, seconds);
+    ESP_LOGD(GEN_TAG, "Trying shutdown delay on report 0x%02X: %d seconds", report_id, seconds);
 
     esp_err_t ret = parent_->hid_set_report(HID_REPORT_TYPE_FEATURE, report_id,
                                             delay_data, 2, parent_->get_report_timeout());
 
     if (ret == ESP_OK)
     {
-      ESP_LOGI(TAG, "Shutdown delay set successfully via report 0x%02X", report_id);
+      ESP_LOGI(GEN_TAG, "Shutdown delay set successfully via report 0x%02X", report_id);
       success = true;
       break;
     }
@@ -1192,7 +1189,7 @@ bool GenericHidProtocol::set_shutdown_delay(int seconds)
 
   if (!success)
   {
-    ESP_LOGW(TAG, "Failed to set shutdown delay - no compatible report found");
+    ESP_LOGW(GEN_TAG, "Failed to set shutdown delay - no compatible report found");
   }
 
   return success;
@@ -1200,35 +1197,33 @@ bool GenericHidProtocol::set_shutdown_delay(int seconds)
 
 bool GenericHidProtocol::set_start_delay(int seconds)
 {
-  ESP_LOGI(TAG, "Setting start delay to %d seconds (Generic HID)", seconds);
+  ESP_LOGI(GEN_TAG, "Setting start delay to %d seconds (Generic HID)", seconds);
 
-  // Validate range (0-7200 seconds = 0-2 hours)
   if (seconds < 0 || seconds > 7200)
   {
-    ESP_LOGW(TAG, "Start delay %d seconds out of range (0-7200)", seconds);
+    ESP_LOGW(GEN_TAG, "Start delay %d seconds out of range (0-7200)", seconds);
     return false;
   }
 
-  // Try common report IDs for start delay configuration
   const std::vector<uint8_t> delay_report_ids = {
-      HID_USAGE_POW_DELAY_BEFORE_STARTUP, // Standard HID usage
+      HID_USAGE_POW_DELAY_BEFORE_STARTUP,
   };
 
   bool success = false;
   for (uint8_t report_id : delay_report_ids)
   {
     uint8_t delay_data[2];
-    delay_data[0] = seconds & 0xFF;        // Low byte
-    delay_data[1] = (seconds >> 8) & 0xFF; // High byte
+    delay_data[0] = seconds & 0xFF;
+    delay_data[1] = (seconds >> 8) & 0xFF;
 
-    ESP_LOGD(TAG, "Trying start delay on report 0x%02X: %d seconds", report_id, seconds);
+    ESP_LOGD(GEN_TAG, "Trying start delay on report 0x%02X: %d seconds", report_id, seconds);
 
     esp_err_t ret = parent_->hid_set_report(HID_REPORT_TYPE_FEATURE, report_id,
                                             delay_data, 2, parent_->get_report_timeout());
 
     if (ret == ESP_OK)
     {
-      ESP_LOGI(TAG, "Start delay set successfully via report 0x%02X", report_id);
+      ESP_LOGI(GEN_TAG, "Start delay set successfully via report 0x%02X", report_id);
       success = true;
       break;
     }
@@ -1236,7 +1231,7 @@ bool GenericHidProtocol::set_start_delay(int seconds)
 
   if (!success)
   {
-    ESP_LOGW(TAG, "Failed to set start delay - no compatible report found");
+    ESP_LOGW(GEN_TAG, "Failed to set start delay - no compatible report found");
   }
 
   return success;
@@ -1244,20 +1239,19 @@ bool GenericHidProtocol::set_start_delay(int seconds)
 
 bool GenericHidProtocol::set_reboot_delay(int seconds)
 {
-  ESP_LOGI(TAG, "Setting reboot delay to %d seconds (Generic HID)", seconds);
+  ESP_LOGI(GEN_TAG, "Setting reboot delay to %d seconds (Generic HID)", seconds);
 
-  // For generic HID, reboot typically involves setting both shutdown and start delays
   bool shutdown_ok = set_shutdown_delay(seconds);
   bool start_ok = set_start_delay(seconds);
 
   if (shutdown_ok || start_ok)
   {
-    ESP_LOGI(TAG, "Reboot delay partially set to %d seconds", seconds);
-    return true; // Return true if at least one succeeded
+    ESP_LOGI(GEN_TAG, "Reboot delay partially set to %d seconds", seconds);
+    return true;
   }
   else
   {
-    ESP_LOGW(TAG, "Failed to set any reboot delay");
+    ESP_LOGW(GEN_TAG, "Failed to set any reboot delay");
     return false;
   }
 }

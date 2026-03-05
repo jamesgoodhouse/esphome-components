@@ -205,6 +205,11 @@ class UpsStatusLedComponent : public Component {
   text_sensor::TextSensor *status_text_sensor_{nullptr};
 #endif
 
+  // Startup state
+  bool first_evaluation_{true};
+  uint32_t startup_delay_{0};
+  uint32_t last_ha_update_{0};
+
   // Thread safety mutex
   mutable std::mutex state_mutex_;
 };

@@ -171,9 +171,9 @@ namespace esphome
       float fallback_nominal_voltage_{230.0f};  // European standard (230V) for international compatibility
 
       bool connected_{false};
-      uint32_t last_successful_read_{0};
+      std::atomic<uint32_t> last_successful_read_{0};
       uint32_t consecutive_failures_{0};
-      uint32_t max_consecutive_failures_{5};  // Limit re-detection attempts
+      uint32_t max_consecutive_failures_{5};
       static constexpr uint32_t DATA_STALE_TIMEOUT_MS = 60000;  // 60s without successful read → reset
       UpsData ups_data_;
       mutable std::mutex data_mutex_;  // Protect ups_data_ access
@@ -186,7 +186,7 @@ namespace esphome
       std::atomic<uint32_t> usb_task_generation_{0};
     std::atomic<bool> transport_needs_reinit_{false};
     std::atomic<bool> usb_task_active_{false};
-    uint32_t recovery_attempts_{0};
+    std::atomic<uint32_t> recovery_attempts_{0};
       static void usb_read_task(void *param);
       void usb_read_loop();
       void check_task_health();

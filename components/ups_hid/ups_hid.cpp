@@ -225,7 +225,7 @@ void UpsHidComponent::usb_read_loop() {
 
     ESP_LOGW(TAG, "Reinitializing USB transport (recovery from hung task)");
     active_protocol_.reset();
-    cached_protocol_name_ = protocol::NONE;
+    { std::lock_guard<std::mutex> lock(data_mutex_); cached_protocol_name_ = protocol::NONE; }
     report_map_.reset();
     if (transport_) {
       transport_->deinitialize();
@@ -320,7 +320,7 @@ void UpsHidComponent::usb_read_loop() {
       if (consecutive_failures_ > max_consecutive_failures_) {
         ESP_LOGW(TAG, log_messages::RESETTING_PROTOCOL);
         active_protocol_.reset();
-        cached_protocol_name_ = protocol::NONE;
+        { std::lock_guard<std::mutex> lock(data_mutex_); cached_protocol_name_ = protocol::NONE; }
         report_map_.reset();
         consecutive_failures_ = 0;
       }
@@ -365,7 +365,7 @@ void UpsHidComponent::dump_config() {
 
   if (transport_ && transport_->is_connected()) {
     ESP_LOGCONFIG(TAG, "  Status: %s", status::CONNECTED);
-    std::string pname = cached_protocol_name_;
+    std::string pname = get_protocol_name();
     if (pname != protocol::NONE) {
       ESP_LOGCONFIG(TAG, "  Active Protocol: %s", pname.c_str());
     } else {
@@ -551,8 +551,11 @@ bool UpsHidComponent::detect_protocol() {
     return false;
   }
 
-  cached_protocol_name_ = active_protocol_->get_protocol_name();
-  ESP_LOGI(TAG, "Protocol initialized: %s", cached_protocol_name_.c_str());
+  {
+    std::lock_guard<std::mutex> lock(data_mutex_);
+    cached_protocol_name_ = active_protocol_->get_protocol_name();
+  }
+  ESP_LOGI(TAG, "Protocol initialized: %s", active_protocol_->get_protocol_name().c_str());
 
   {
     std::lock_guard<std::mutex> lock(data_mutex_);
@@ -856,6 +859,7 @@ bool UpsHidComponent::set_start_delay(int s)      { queue_command(CmdType::SET_S
 bool UpsHidComponent::set_reboot_delay(int s)     { queue_command(CmdType::SET_REBOOT_DELAY, s); return true; }
 
 std::string UpsHidComponent::get_protocol_name() const {
+  std::lock_guard<std::mutex> lock(data_mutex_);
   return cached_protocol_name_;
 }
 
@@ -908,7 +912,7 @@ void UpsHidComponent::cleanup() {
   }
 
   active_protocol_.reset();
-  cached_protocol_name_ = protocol::NONE;
+  { std::lock_guard<std::mutex> lock(data_mutex_); cached_protocol_name_ = protocol::NONE; }
   report_map_.reset();
   connected_ = false;
 

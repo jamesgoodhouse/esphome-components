@@ -409,34 +409,38 @@ void NutServerComponent::process_command(NutClient &client, const std::string &c
     } else {
       send_error(client, "INVALID-ARGUMENT");
     }
-  } else if (cmd == get_ups_name()) {
-    // Legacy upsc -l format: sends UPS name directly as command
-    handle_legacy_list_vars(client, cmd);
-  }
-  // Write commands: SET, INSTCMD, FSD require authentication
-  else if (auth_enabled() && !client.is_authenticated()) {
-    send_error(client, "ACCESS-DENIED");
-  } else if (cmd == "SET") {
-    size_t sub_pos = args.find(' ');
-    std::string subcmd = (sub_pos != std::string::npos) ?
-                         args.substr(0, sub_pos) : args;
-    std::string subargs = (sub_pos != std::string::npos) ?
-                          args.substr(sub_pos + 1) : "";
-
-    std::transform(subcmd.begin(), subcmd.end(), subcmd.begin(), ::toupper);
-
-    if (subcmd == "VAR") {
-      handle_set_var(client, subargs);
-    } else {
-      send_error(client, "INVALID-ARGUMENT");
-    }
-  } else if (cmd == "INSTCMD") {
-    handle_instcmd(client, args);
-  } else if (cmd == "FSD") {
-    handle_fsd(client, args);
   } else {
-    ESP_LOGW(TAG, "Unknown command received: '%s' with args: '%s'", cmd.c_str(), args.c_str());
-    send_error(client, "UNKNOWN-COMMAND");
+    // Check for legacy upsc -l format: UPS name sent directly as command
+    std::string ups_name_upper = get_ups_name();
+    std::transform(ups_name_upper.begin(), ups_name_upper.end(), ups_name_upper.begin(), ::toupper);
+    if (cmd == ups_name_upper) {
+      handle_legacy_list_vars(client, get_ups_name());
+    }
+    // Write commands: SET, INSTCMD, FSD require authentication
+    else if (auth_enabled() && !client.is_authenticated()) {
+      send_error(client, "ACCESS-DENIED");
+    } else if (cmd == "SET") {
+      size_t sub_pos = args.find(' ');
+      std::string subcmd = (sub_pos != std::string::npos) ?
+                           args.substr(0, sub_pos) : args;
+      std::string subargs = (sub_pos != std::string::npos) ?
+                            args.substr(sub_pos + 1) : "";
+
+      std::transform(subcmd.begin(), subcmd.end(), subcmd.begin(), ::toupper);
+
+      if (subcmd == "VAR") {
+        handle_set_var(client, subargs);
+      } else {
+        send_error(client, "INVALID-ARGUMENT");
+      }
+    } else if (cmd == "INSTCMD") {
+      handle_instcmd(client, args);
+    } else if (cmd == "FSD") {
+      handle_fsd(client, args);
+    } else {
+      ESP_LOGW(TAG, "Unknown command received: '%s' with args: '%s'", cmd.c_str(), args.c_str());
+      send_error(client, "UNKNOWN-COMMAND");
+    }
   }
 }
 
@@ -944,8 +948,7 @@ bool NutServerComponent::send_response(NutClient &client, const std::string &res
     int bytes_sent = send(client.socket_fd, data + total_sent, remaining, 0);
     if (bytes_sent < 0) {
       if (errno == EAGAIN || errno == EWOULDBLOCK) {
-        // Socket buffer full, yield briefly and retry (with timeout protection above)
-        delay(1);
+        vTaskDelay(pdMS_TO_TICKS(1));
         continue;
       }
       if (errno == ECONNRESET || errno == EPIPE || errno == ENOTCONN) {
