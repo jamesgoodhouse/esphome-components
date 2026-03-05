@@ -113,7 +113,7 @@ void UpsHidComponent::check_task_health() {
   // read, the USB stack is unrecoverable. Reboot the ESP.
   recovery_attempts_++;
   if (recovery_attempts_ >= 3) {
-    ESP_LOGE(TAG, "USB recovery failed %u times, rebooting ESP", recovery_attempts_);
+    ESP_LOGE(TAG, "USB recovery failed %u times, rebooting ESP", recovery_attempts_.load());
     delay(100);  // Let the log message flush
     App.safe_reboot();
     return;
@@ -127,7 +127,7 @@ void UpsHidComponent::check_task_health() {
   transport_needs_reinit_.store(true);
 
   xTaskCreate(usb_read_task, "ups_usb_read", 8192, this, 1, &usb_read_task_handle_);
-  ESP_LOGI(TAG, "Recovery attempt %u: new USB read task spawned", recovery_attempts_);
+  ESP_LOGI(TAG, "Recovery attempt %u: new USB read task spawned", recovery_attempts_.load());
 }
 
 void UpsHidComponent::queue_command(CmdType type, int param) {
