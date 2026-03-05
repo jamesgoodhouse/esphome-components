@@ -206,7 +206,7 @@ namespace esphome
       void process_pending_commands();
 
       // Cached protocol name for thread-safe main-loop access
-      std::string cached_protocol_name_{protocol::NONE};
+      std::string cached_protocol_name_{"None"};
 
     // Fast polling for timer countdown (managed by background task)
     bool fast_polling_mode_{false};
