@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 #include <mutex>
+#include <atomic>
 #include <cstdint>
 
 namespace esphome {
@@ -42,11 +43,18 @@ class StateEventLog {
   // Persist the most recent events to NVS flash.
   void save_to_nvs() const;
 
+  // Returns true if events have been recorded since the last NVS save.
+  bool needs_nvs_save() const { return nvs_dirty_.load(); }
+
+  // Persist if dirty, then clear the flag.
+  void flush_nvs_if_dirty();
+
  private:
   mutable std::mutex mutex_;
   std::vector<StateEvent> buffer_;
-  size_t head_{0};   // Next write position
-  size_t count_{0};  // Number of stored events
+  size_t head_{0};
+  size_t count_{0};
+  mutable std::atomic<bool> nvs_dirty_{false};
 
 };
 

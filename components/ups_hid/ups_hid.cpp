@@ -75,14 +75,13 @@ void UpsHidComponent::setup() {
 }
 
 void UpsHidComponent::update() {
-  // update() runs on ESPHome's main loop -- never blocks on USB.
-  // The background task does all USB I/O and sets new_data_available_.
+  // update() runs on ESPHome's main loop -- MUST NEVER block on USB I/O.
+  // The background task does all USB reads/writes and sets new_data_available_.
   check_task_health();
 
   if (new_data_available_.exchange(false)) {
     update_sensors();
     check_state_changes();
-    check_and_update_timers();
   }
 }
 
@@ -131,24 +130,102 @@ void UpsHidComponent::check_task_health() {
   ESP_LOGI(TAG, "Recovery attempt %u: new USB read task spawned", recovery_attempts_);
 }
 
+void UpsHidComponent::queue_command(CmdType type, int param) {
+  std::lock_guard<std::mutex> lock(command_mutex_);
+  pending_commands_.push_back({type, param});
+}
+
+void UpsHidComponent::process_pending_commands() {
+  std::vector<PendingCmd> cmds;
+  {
+    std::lock_guard<std::mutex> lock(command_mutex_);
+    cmds.swap(pending_commands_);
+  }
+  if (cmds.empty() || !active_protocol_) return;
+
+  for (const auto &cmd : cmds) {
+    bool ok = false;
+    switch (cmd.type) {
+      case CmdType::BEEPER_ENABLE:        ok = active_protocol_->beeper_enable(); break;
+      case CmdType::BEEPER_DISABLE:       ok = active_protocol_->beeper_disable(); break;
+      case CmdType::BEEPER_MUTE:          ok = active_protocol_->beeper_mute(); break;
+      case CmdType::BEEPER_TEST:          ok = active_protocol_->beeper_test(); break;
+      case CmdType::BATTERY_TEST_QUICK:   ok = active_protocol_->start_battery_test_quick(); break;
+      case CmdType::BATTERY_TEST_DEEP:    ok = active_protocol_->start_battery_test_deep(); break;
+      case CmdType::BATTERY_TEST_STOP:    ok = active_protocol_->stop_battery_test(); break;
+      case CmdType::UPS_TEST_START:       ok = active_protocol_->start_ups_test(); break;
+      case CmdType::UPS_TEST_STOP:        ok = active_protocol_->stop_ups_test(); break;
+      case CmdType::SET_SHUTDOWN_DELAY:   ok = active_protocol_->set_shutdown_delay(cmd.param); break;
+      case CmdType::SET_START_DELAY:      ok = active_protocol_->set_start_delay(cmd.param); break;
+      case CmdType::SET_REBOOT_DELAY:     ok = active_protocol_->set_reboot_delay(cmd.param); break;
+    }
+    ESP_LOGI(TAG, "Command %d executed: %s", static_cast<int>(cmd.type), ok ? "OK" : "FAILED");
+  }
+}
+
+void UpsHidComponent::read_and_update_timers() {
+  if (!active_protocol_) return;
+
+  UpsData timer_data;
+  {
+    std::lock_guard<std::mutex> lock(data_mutex_);
+    timer_data = ups_data_;
+  }
+
+  if (!active_protocol_->read_timer_data(timer_data)) return;
+
+  bool changed = false;
+  {
+    std::lock_guard<std::mutex> lock(data_mutex_);
+    if (ups_data_.test.timer_shutdown != timer_data.test.timer_shutdown ||
+        ups_data_.test.timer_start != timer_data.test.timer_start ||
+        ups_data_.test.timer_reboot != timer_data.test.timer_reboot) {
+      ups_data_.test.timer_shutdown = timer_data.test.timer_shutdown;
+      ups_data_.test.timer_start = timer_data.test.timer_start;
+      ups_data_.test.timer_reboot = timer_data.test.timer_reboot;
+      changed = true;
+    }
+  }
+
+  if (changed) new_data_available_.store(true);
+
+  bool timers_active = (timer_data.test.timer_shutdown > 0 ||
+                        timer_data.test.timer_start > 0 ||
+                        timer_data.test.timer_reboot > 0);
+  if (timers_active != fast_polling_mode_) {
+    fast_polling_mode_ = timers_active;
+    ESP_LOGI(TAG, "Timer polling: %s", timers_active ? "fast (2s)" : "normal");
+  }
+}
+
 void UpsHidComponent::usb_read_task(void *param) {
   auto *self = static_cast<UpsHidComponent *>(param);
   self->usb_read_loop();
+  self->usb_task_active_ = false;
   vTaskDelete(nullptr);
 }
 
 void UpsHidComponent::usb_read_loop() {
   const uint32_t my_generation = usb_task_generation_.load();
 
-  // Set heartbeat immediately so check_task_health() can detect if we get
-  // stuck during transport reinit (before the main while loop).
   usb_task_heartbeat_.store(millis());
 
   // If flagged by check_task_health(), reinitialize transport before starting.
-  // This runs in the background task so it won't starve the main-loop watchdog.
+  // We MUST wait for the old task to finish using active_protocol_ / transport_
+  // to avoid a use-after-free.
   if (transport_needs_reinit_.exchange(false)) {
+    ESP_LOGW(TAG, "Waiting for previous task to release shared resources...");
+    for (int i = 0; i < 100 && usb_task_active_.load(); i++) {
+      usb_task_heartbeat_.store(millis());
+      vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    if (usb_task_active_.load()) {
+      ESP_LOGE(TAG, "Old task did not exit after 10s - proceeding with reinit anyway");
+    }
+
     ESP_LOGW(TAG, "Reinitializing USB transport (recovery from hung task)");
     active_protocol_.reset();
+    cached_protocol_name_ = protocol::NONE;
     report_map_.reset();
     if (transport_) {
       transport_->deinitialize();
@@ -163,12 +240,13 @@ void UpsHidComponent::usb_read_loop() {
     }
   }
 
+  usb_task_active_ = true;
+
   while (usb_task_running_.load()) {
-    // If a newer task has been spawned, this task is superseded -- exit cleanly.
     if (usb_task_generation_.load() != my_generation) {
       ESP_LOGI(TAG, "USB read task (gen %u) superseded by gen %u, exiting",
                my_generation, usb_task_generation_.load());
-      return;
+      return;  // usb_task_active_ cleared by usb_read_task() after we return
     }
 
     uint32_t now = millis();
@@ -176,13 +254,11 @@ void UpsHidComponent::usb_read_loop() {
     uint32_t interval = get_update_interval();
 
     if (!transport_ || !transport_->is_connected()) {
-      // Log at WARN every 30s so this state is visible, not hidden at DEBUG
-      static uint32_t last_waiting_log = 0;
-      if (now - last_waiting_log > 30000) {
+      if (now - last_waiting_log_ > 30000) {
         ESP_LOGW(TAG, "Waiting for USB device (transport %s, connected: %s)",
                  transport_ ? "present" : "null",
                  transport_ ? (transport_->is_connected() ? "yes" : "no") : "n/a");
-        last_waiting_log = now;
+        last_waiting_log_ = now;
       }
       vTaskDelay(pdMS_TO_TICKS(interval));
       continue;
@@ -226,6 +302,9 @@ void UpsHidComponent::usb_read_loop() {
       }
     }
 
+    // Process any commands queued by the main loop (beeper, test, delay, etc.)
+    process_pending_commands();
+
     // Read data (this is the slow USB I/O part -- can take seconds if reports
     // are timing out).  Update heartbeat before and after so check_task_health()
     // doesn't think we're dead during a long read cycle.
@@ -241,11 +320,11 @@ void UpsHidComponent::usb_read_loop() {
       if (consecutive_failures_ > max_consecutive_failures_) {
         ESP_LOGW(TAG, log_messages::RESETTING_PROTOCOL);
         active_protocol_.reset();
+        cached_protocol_name_ = protocol::NONE;
         report_map_.reset();
         consecutive_failures_ = 0;
       }
 
-      // If no successful read for a long time, reset to avoid serving stale data
       if (last_successful_read_ > 0 &&
           (millis() - last_successful_read_) > DATA_STALE_TIMEOUT_MS) {
         ESP_LOGW(TAG, "No successful read for %us, clearing stale data",
@@ -259,7 +338,14 @@ void UpsHidComponent::usb_read_loop() {
       }
     }
 
-    vTaskDelay(pdMS_TO_TICKS(interval));
+    // Read timers (runs on this background task, never on main loop)
+    read_and_update_timers();
+
+    // Flush any pending NVS writes (deferred from main loop's record() calls)
+    event_log_.flush_nvs_if_dirty();
+
+    uint32_t delay_ms = fast_polling_mode_ ? FAST_POLL_INTERVAL_MS : interval;
+    vTaskDelay(pdMS_TO_TICKS(delay_ms));
   }
 }
 
@@ -279,9 +365,9 @@ void UpsHidComponent::dump_config() {
 
   if (transport_ && transport_->is_connected()) {
     ESP_LOGCONFIG(TAG, "  Status: %s", status::CONNECTED);
-    if (active_protocol_) {
-      ESP_LOGCONFIG(TAG, "  Active Protocol: %s",
-                   active_protocol_->get_protocol_name().c_str());
+    std::string pname = cached_protocol_name_;
+    if (pname != protocol::NONE) {
+      ESP_LOGCONFIG(TAG, "  Active Protocol: %s", pname.c_str());
     } else {
       ESP_LOGCONFIG(TAG, "  Protocol Status: %s", status::DETECTION_PENDING);
     }
@@ -465,10 +551,9 @@ bool UpsHidComponent::detect_protocol() {
     return false;
   }
 
-  ESP_LOGI(TAG, "Protocol initialized: %s",
-           active_protocol_->get_protocol_name().c_str());
+  cached_protocol_name_ = active_protocol_->get_protocol_name();
+  ESP_LOGI(TAG, "Protocol initialized: %s", cached_protocol_name_.c_str());
 
-  // Set the detected protocol in ups_data_ after successful detection
   {
     std::lock_guard<std::mutex> lock(data_mutex_);
     ups_data_.device.detected_protocol = active_protocol_->get_protocol_type();
@@ -483,15 +568,22 @@ bool UpsHidComponent::read_ups_data() {
     return false;
   }
 
-  std::lock_guard<std::mutex> lock(data_mutex_);
+  // Snapshot device info under the mutex, then RELEASE before USB I/O so
+  // the NUT server, convenience methods, and any main-loop lambdas are
+  // never blocked for the duration of the (potentially multi-second) read.
+  DeviceInfo saved_device;
+  {
+    std::lock_guard<std::mutex> lock(data_mutex_);
+    saved_device = ups_data_.device;
+  }
 
-  // Read into a fresh temporary so partial USB failures produce NAN
-  // rather than clobbering previously-good values in ups_data_.
   UpsData new_data;
-  new_data.device = ups_data_.device;
+  new_data.device = saved_device;
 
   bool success = active_protocol_->read_data(new_data);
 
+  // Re-acquire briefly to merge results.
+  std::lock_guard<std::mutex> lock(data_mutex_);
   if (success) {
     uint8_t prev_stale = ups_data_.power.status_stale_cycles;
     ups_data_.merge_from(new_data);
@@ -748,111 +840,23 @@ void UpsHidComponent::register_delay_number(UpsDelayNumber *number) {
   ESP_LOGD(TAG, "Registered delay number component");
 }
 
-// Test control methods
-bool UpsHidComponent::start_battery_test_quick() {
-  if (!active_protocol_) {
-    ESP_LOGW(TAG, "No active protocol for battery test");
-    return false;
-  }
-  return active_protocol_->start_battery_test_quick();
-}
+// All control methods queue commands for the background task.
+// Returns true (command accepted), actual execution is asynchronous.
+bool UpsHidComponent::start_battery_test_quick() { queue_command(CmdType::BATTERY_TEST_QUICK); return true; }
+bool UpsHidComponent::start_battery_test_deep()  { queue_command(CmdType::BATTERY_TEST_DEEP); return true; }
+bool UpsHidComponent::stop_battery_test()         { queue_command(CmdType::BATTERY_TEST_STOP); return true; }
+bool UpsHidComponent::start_ups_test()            { queue_command(CmdType::UPS_TEST_START); return true; }
+bool UpsHidComponent::stop_ups_test()             { queue_command(CmdType::UPS_TEST_STOP); return true; }
+bool UpsHidComponent::beeper_enable()             { queue_command(CmdType::BEEPER_ENABLE); return true; }
+bool UpsHidComponent::beeper_disable()            { queue_command(CmdType::BEEPER_DISABLE); return true; }
+bool UpsHidComponent::beeper_mute()               { queue_command(CmdType::BEEPER_MUTE); return true; }
+bool UpsHidComponent::beeper_test()               { queue_command(CmdType::BEEPER_TEST); return true; }
+bool UpsHidComponent::set_shutdown_delay(int s)   { queue_command(CmdType::SET_SHUTDOWN_DELAY, s); return true; }
+bool UpsHidComponent::set_start_delay(int s)      { queue_command(CmdType::SET_START_DELAY, s); return true; }
+bool UpsHidComponent::set_reboot_delay(int s)     { queue_command(CmdType::SET_REBOOT_DELAY, s); return true; }
 
-bool UpsHidComponent::start_battery_test_deep() {
-  if (!active_protocol_) {
-    ESP_LOGW(TAG, "No active protocol for battery test");
-    return false;
-  }
-  return active_protocol_->start_battery_test_deep();
-}
-
-bool UpsHidComponent::stop_battery_test() {
-  if (!active_protocol_) {
-    ESP_LOGW(TAG, "No active protocol for battery test");
-    return false;
-  }
-  return active_protocol_->stop_battery_test();
-}
-
-bool UpsHidComponent::start_ups_test() {
-  if (!active_protocol_) {
-    ESP_LOGW(TAG, "No active protocol for UPS test");
-    return false;
-  }
-  return active_protocol_->start_ups_test();
-}
-
-bool UpsHidComponent::stop_ups_test() {
-  if (!active_protocol_) {
-    ESP_LOGW(TAG, "No active protocol for UPS test");
-    return false;
-  }
-  return active_protocol_->stop_ups_test();
-}
-
-// Beeper control methods
-bool UpsHidComponent::beeper_enable() {
-  if (!active_protocol_) {
-    ESP_LOGW(TAG, "No active protocol for beeper control");
-    return false;
-  }
-  return active_protocol_->beeper_enable();
-}
-
-bool UpsHidComponent::beeper_disable() {
-  if (!active_protocol_) {
-    ESP_LOGW(TAG, "No active protocol for beeper control");
-    return false;
-  }
-  return active_protocol_->beeper_disable();
-}
-
-bool UpsHidComponent::beeper_mute() {
-  if (!active_protocol_) {
-    ESP_LOGW(TAG, "No active protocol for beeper control");
-    return false;
-  }
-  return active_protocol_->beeper_mute();
-}
-
-bool UpsHidComponent::beeper_test() {
-  if (!active_protocol_) {
-    ESP_LOGW(TAG, "No active protocol for beeper control");
-    return false;
-  }
-  return active_protocol_->beeper_test();
-}
-
-// Delay configuration methods
-bool UpsHidComponent::set_shutdown_delay(int seconds) {
-  if (!active_protocol_) {
-    ESP_LOGW(TAG, "No active protocol for delay configuration");
-    return false;
-  }
-  return active_protocol_->set_shutdown_delay(seconds);
-}
-
-bool UpsHidComponent::set_start_delay(int seconds) {
-  if (!active_protocol_) {
-    ESP_LOGW(TAG, "No active protocol for delay configuration");
-    return false;
-  }
-  return active_protocol_->set_start_delay(seconds);
-}
-
-bool UpsHidComponent::set_reboot_delay(int seconds) {
-  if (!active_protocol_) {
-    ESP_LOGW(TAG, "No active protocol for delay configuration");
-    return false;
-  }
-  return active_protocol_->set_reboot_delay(seconds);
-}
-
-// Additional protocol access method
 std::string UpsHidComponent::get_protocol_name() const {
-  if (active_protocol_) {
-    return active_protocol_->get_protocol_name();
-  }
-  return protocol::NONE;
+  return cached_protocol_name_;
 }
 
 
@@ -886,14 +890,16 @@ void UpsHidComponent::log_suppressed_errors(ErrorRateLimit& limiter) {
 }
 
 void UpsHidComponent::cleanup() {
-  // Stop the background task before tearing down transport
   if (usb_task_running_.load()) {
     usb_task_running_.store(false);
-    if (usb_read_task_handle_) {
-      // Give the task time to exit its loop
-      vTaskDelay(pdMS_TO_TICKS(200));
-      usb_read_task_handle_ = nullptr;
+    // Wait for the background task to finish any in-flight USB I/O and exit.
+    for (int i = 0; i < 100 && usb_task_active_.load(); i++) {
+      vTaskDelay(pdMS_TO_TICKS(100));
     }
+    if (usb_task_active_.load()) {
+      ESP_LOGW(TAG, "USB task did not exit after 10s during cleanup");
+    }
+    usb_read_task_handle_ = nullptr;
   }
 
   if (transport_) {
@@ -902,76 +908,13 @@ void UpsHidComponent::cleanup() {
   }
 
   active_protocol_.reset();
+  cached_protocol_name_ = protocol::NONE;
   report_map_.reset();
   connected_ = false;
 
   ESP_LOGD(TAG, "Component cleanup completed");
 }
 
-// Timer polling implementation
-void UpsHidComponent::check_and_update_timers() {
-  if (!active_protocol_) return;
-
-  uint32_t now = millis();
-
-  // Check if we need to poll timers
-  bool should_poll_timers = false;
-
-  if (fast_polling_mode_) {
-    // In fast polling mode, check every 2 seconds
-    if (now - last_timer_poll_ >= FAST_POLL_INTERVAL_MS) {
-      should_poll_timers = true;
-    }
-  } else {
-    // Check if any timers might be active (less frequent check)
-    if (now - last_timer_poll_ >= get_update_interval()) {
-      should_poll_timers = true;
-    }
-  }
-
-  if (should_poll_timers) {
-    last_timer_poll_ = now;
-
-    // Try to read timer data
-    UpsData timer_data = ups_data_;  // Copy current data
-    if (active_protocol_->read_timer_data(timer_data)) {
-      // Update only timer-related fields
-      {
-        std::lock_guard<std::mutex> lock(data_mutex_);
-        ups_data_.test.timer_shutdown = timer_data.test.timer_shutdown;
-        ups_data_.test.timer_start = timer_data.test.timer_start;
-        ups_data_.test.timer_reboot = timer_data.test.timer_reboot;
-      }
-
-      // Update fast polling mode based on timer activity
-      bool timers_active = has_active_timers();
-      if (timers_active != fast_polling_mode_) {
-        set_fast_polling_mode(timers_active);
-      }
-
-      // Update timer sensors immediately when values change
-      update_sensors();
-    }
-  }
-}
-
-bool UpsHidComponent::has_active_timers() const {
-  std::lock_guard<std::mutex> lock(data_mutex_);
-  return (ups_data_.test.timer_shutdown > 0 ||
-          ups_data_.test.timer_start > 0 ||
-          ups_data_.test.timer_reboot > 0);
-}
-
-void UpsHidComponent::set_fast_polling_mode(bool enable) {
-  if (enable != fast_polling_mode_) {
-    fast_polling_mode_ = enable;
-    if (enable) {
-      ESP_LOGI(TAG, "Enabled fast polling for timer countdown");
-    } else {
-      ESP_LOGI(TAG, "Disabled fast polling, returning to normal interval");
-    }
-  }
-}
 
 // Format a timestamp for event log entries.
 // Uses wall-clock time if a time source is configured and synced, otherwise uptime.

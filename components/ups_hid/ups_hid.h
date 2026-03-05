@@ -71,7 +71,7 @@ namespace esphome
     {
     public:
       UpsHidComponent() = default;
-      ~UpsHidComponent() = default;
+      ~UpsHidComponent() { cleanup(); }
 
       void setup() override;
       void update() override;
@@ -118,24 +118,23 @@ namespace esphome
       float get_load_percent() const;
       float get_runtime_minutes() const;
 
-      // Test control methods
+      // Control methods -- commands are queued and executed on the background
+      // USB task so the main loop never blocks on USB I/O.
       bool start_battery_test_quick();
       bool start_battery_test_deep();
       bool stop_battery_test();
       bool start_ups_test();
       bool stop_ups_test();
 
-      // Beeper control methods
       bool beeper_enable();
       bool beeper_disable();
       bool beeper_mute();
       bool beeper_test();
 
-      // Delay configuration methods
       bool set_shutdown_delay(int seconds);
       bool set_start_delay(int seconds);
       bool set_reboot_delay(int seconds);
-      void request_delay_refresh() { /* No-op for now - could trigger update if needed */ }
+      void request_delay_refresh() { }
 
       // Sensor registration methods (conditional on platform availability)
 #ifdef USE_SENSOR
@@ -185,16 +184,34 @@ namespace esphome
       std::atomic<bool> usb_task_running_{false};
       std::atomic<uint32_t> usb_task_heartbeat_{0};
       std::atomic<uint32_t> usb_task_generation_{0};
-      std::atomic<bool> transport_needs_reinit_{false};
-      uint32_t recovery_attempts_{0};
+    std::atomic<bool> transport_needs_reinit_{false};
+    std::atomic<bool> usb_task_active_{false};
+    uint32_t recovery_attempts_{0};
       static void usb_read_task(void *param);
       void usb_read_loop();
       void check_task_health();
 
-      // Fast polling for timer countdown
-      bool fast_polling_mode_{false};
-      uint32_t last_timer_poll_{0};
-      static constexpr uint32_t FAST_POLL_INTERVAL_MS = 2000;  // 2 seconds during countdown
+      // Command queue -- main loop pushes, background task executes.
+      // Keeps all USB I/O off the main loop.
+      enum class CmdType : uint8_t {
+        BEEPER_ENABLE, BEEPER_DISABLE, BEEPER_MUTE, BEEPER_TEST,
+        BATTERY_TEST_QUICK, BATTERY_TEST_DEEP, BATTERY_TEST_STOP,
+        UPS_TEST_START, UPS_TEST_STOP,
+        SET_SHUTDOWN_DELAY, SET_START_DELAY, SET_REBOOT_DELAY,
+      };
+      struct PendingCmd { CmdType type; int param{0}; };
+      std::mutex command_mutex_;
+      std::vector<PendingCmd> pending_commands_;
+      void queue_command(CmdType type, int param = 0);
+      void process_pending_commands();
+
+      // Cached protocol name for thread-safe main-loop access
+      std::string cached_protocol_name_{protocol::NONE};
+
+    // Fast polling for timer countdown (managed by background task)
+    bool fast_polling_mode_{false};
+    uint32_t last_waiting_log_{0};
+      static constexpr uint32_t FAST_POLL_INTERVAL_MS = 2000;
 
       // Error rate limiting to prevent log spam
       struct ErrorRateLimit {
@@ -240,10 +257,8 @@ namespace esphome
       bool read_ups_data();
       void update_sensors();
 
-      // Timer polling methods
-      void check_and_update_timers();
-      bool has_active_timers() const;
-      void set_fast_polling_mode(bool enable);
+      // Timer reading (runs on background task only)
+      void read_and_update_timers();
 
       // Error rate limiting helpers
       bool should_log_error(ErrorRateLimit& limiter);

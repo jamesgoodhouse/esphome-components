@@ -6,6 +6,7 @@
 #include <vector>
 #include <string>
 #include <mutex>
+#include <atomic>
 #include <optional>
 
 #ifdef USE_ESP32
@@ -20,6 +21,8 @@ namespace esphome {
 // Forward declarations
 namespace ups_hid {
 class UpsHidComponent;
+struct UpsCompositeData;
+using UpsData = UpsCompositeData;
 }
 
 namespace nut_server {
@@ -149,6 +152,7 @@ protected:
   bool send_error(NutClient &client, const std::string &error);
   bool authenticate(const std::string &username, const std::string &password);
   std::string get_ups_var(const std::string &var_name);
+  std::string resolve_ups_var(const std::string &var_name, const ups_hid::UpsData &data);
   std::string get_ups_description();
   std::string get_ups_name();  // Dynamic UPS name from component
   std::vector<std::string> get_available_commands();
@@ -158,15 +162,16 @@ protected:
 
   // Data access using provider pattern (like status LED component)
   bool has_ups_data() const;
-  std::string get_ups_status() const;
-  std::string get_ups_manufacturer() const;
-  std::string get_ups_model() const;
+  std::string get_ups_status(const ups_hid::UpsData *snapshot = nullptr) const;
+  std::string get_ups_manufacturer(const ups_hid::UpsData *snapshot = nullptr) const;
+  std::string get_ups_model(const ups_hid::UpsData *snapshot = nullptr) const;
 
 private:
   // Server task management
   static void server_task(void *param);
   TaskHandle_t server_task_handle_{nullptr};
-  bool server_running_{false};
+  std::atomic<bool> server_running_{false};
+  std::atomic<bool> server_task_exited_{true};
 
   // Network resources
   int server_socket_{-1};

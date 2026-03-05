@@ -48,6 +48,7 @@ public:
     esp_err_t get_hid_report_descriptor(std::vector<uint8_t>& descriptor) override;
 
     std::string get_last_error() const override;
+    uint32_t get_leaked_transfer_count() const { return leaked_transfers_.load(); }
 
 private:
     // USB device structure
@@ -78,10 +79,16 @@ private:
     TaskHandle_t usb_lib_task_handle_{nullptr};
     TaskHandle_t usb_client_task_handle_{nullptr};
     std::atomic<bool> usb_tasks_running_{false};
+    std::atomic<bool> usb_lib_task_exited_{true};
+    std::atomic<bool> usb_client_task_exited_{true};
 
     // Error handling
     mutable std::mutex error_mutex_;
     std::string last_error_;
+
+    // Tracks transfers intentionally leaked on semaphore timeout.
+    // Each leak is ~200 bytes of unrecoverable memory.
+    std::atomic<uint32_t> leaked_transfers_{0};
 
     // Private methods
     static void usb_lib_task(void* arg);

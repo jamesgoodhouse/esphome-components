@@ -4,9 +4,10 @@
 #include "esphome/core/util.h"
 #include "esphome/core/hal.h"
 #include <algorithm>
-#include <sstream>
-#include <iomanip>
+#include <cmath>
 #include <cstring>
+#include <iomanip>
+#include <sstream>
 
 #ifdef USE_ESP32
 #include "lwip/err.h"
@@ -117,7 +118,8 @@ bool NutServerComponent::start_server() {
 
   // Create server task
   server_running_ = true;
-  xTaskCreate(server_task, "nut_server", 4096, this, 1, &server_task_handle_);
+  server_task_exited_ = false;
+  xTaskCreate(server_task, "nut_server", 8192, this, 1, &server_task_handle_);
 
   return true;
 #else
@@ -147,9 +149,15 @@ void NutServerComponent::stop_server() {
     server_socket_ = -1;
   }
 
-  // Wait for server task to finish
+  // Wait for server task to exit on its own (max 5s)
   if (server_task_handle_) {
-    vTaskDelete(server_task_handle_);
+    for (int i = 0; i < 50 && !server_task_exited_.load(); i++) {
+      vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    if (!server_task_exited_.load()) {
+      ESP_LOGW(TAG, "Server task did not exit in time, force deleting");
+      vTaskDelete(server_task_handle_);
+    }
     server_task_handle_ = nullptr;
   }
 #endif
@@ -187,6 +195,7 @@ void NutServerComponent::server_task(void *param) {
     vTaskDelay(10 / portTICK_PERIOD_MS);
   }
 
+  server->server_task_exited_.store(true);
   vTaskDelete(nullptr);
 #endif
 }
@@ -523,16 +532,17 @@ void NutServerComponent::handle_list_var(NutClient &client, const std::string &a
     return;
   }
 
-  if (!has_ups_data()) {
+  if (!has_ups_data() || !ups_hid_) {
     send_error(client, "DATA-STALE");
     return;
   }
 
+  // Single snapshot: one mutex acquisition instead of hundreds.
+  auto snapshot = ups_hid_->get_ups_data();
+
   std::string ups_name = get_ups_name();
   std::string response = "BEGIN LIST VAR " + ups_name + "\n";
 
-  // Standard NUT variables mapping to actual UPS data
-  // Comprehensive list matching what NUT's usbhid-ups driver reports
   std::vector<std::string> variables = {
     "battery.capacity", "battery.charge", "battery.charge.low", "battery.charge.warning",
     "battery.mfr.date", "battery.runtime", "battery.type",
@@ -555,20 +565,18 @@ void NutServerComponent::handle_list_var(NutClient &client, const std::string &a
   };
 
   for (const auto &var : variables) {
-    std::string value = get_ups_var(var);
+    std::string value = resolve_ups_var(var, snapshot);
     if (!value.empty()) {
       response += "VAR " + ups_name + " " + var + " \"" + value + "\"\n";
     }
   }
 
   // Append individual event log entries
-  if (ups_hid_) {
-    size_t event_count = ups_hid_->get_event_log().size();
-    for (size_t i = 0; i < event_count; i++) {
-      std::string event = ups_hid_->get_event_log().get_event(i);
-      if (!event.empty()) {
-        response += "VAR " + ups_name + " ups.debug.event." + std::to_string(i) + " \"" + event + "\"\n";
-      }
+  size_t event_count = ups_hid_->get_event_log().size();
+  for (size_t i = 0; i < event_count; i++) {
+    std::string event = ups_hid_->get_event_log().get_event(i);
+    if (!event.empty()) {
+      response += "VAR " + ups_name + " ups.debug.event." + std::to_string(i) + " \"" + event + "\"\n";
     }
   }
 
@@ -770,22 +778,8 @@ void NutServerComponent::handle_upsdver(NutClient &client) {
 void NutServerComponent::handle_starttls(NutClient &client) {
   // STARTTLS is not supported (we don't have TLS/SSL).
   // Most clients (Synology, upsmon) send this on every connection and
-  // gracefully fall back to plaintext. Don't log at DEBUG to reduce noise.
-  std::string response = "ERR FEATURE-NOT-SUPPORTED\n";
-#ifdef USE_ESP32
-  size_t total_sent = 0;
-  size_t remaining = response.length();
-  const char* data = response.c_str();
-  while (remaining > 0) {
-    int bytes_sent = send(client.socket_fd, data + total_sent, remaining, 0);
-    if (bytes_sent < 0) {
-      if (errno == EAGAIN || errno == EWOULDBLOCK) { delay(1); continue; }
-      return;
-    }
-    total_sent += bytes_sent;
-    remaining -= bytes_sent;
-  }
-#endif
+  // gracefully fall back to plaintext.
+  send_response(client, "ERR FEATURE-NOT-SUPPORTED\n");
 }
 
 void NutServerComponent::handle_username(NutClient &client, const std::string &args) {
@@ -991,170 +985,134 @@ bool NutServerComponent::authenticate(const std::string &username, const std::st
 }
 
 std::string NutServerComponent::get_ups_var(const std::string &var_name) {
-  if (!has_ups_data()) {
+  if (!has_ups_data() || !ups_hid_) {
     return "";
   }
 
-  // Map variable names to data using data provider pattern
-  if (var_name == "ups.mfr") return get_ups_manufacturer();
-  if (var_name == "ups.model") return get_ups_model();
+  auto snapshot = ups_hid_->get_ups_data();
+  return resolve_ups_var(var_name, snapshot);
+}
 
-  // Driver identification (always available, required by some NUT clients)
+std::string NutServerComponent::resolve_ups_var(const std::string &var_name,
+                                                const ups_hid::UpsData &data) {
+  // Manufacturer / model
+  std::string mfr = data.device.manufacturer.empty() ? "Unknown" : data.device.manufacturer;
+  std::string model = data.device.model.empty() ? "Unknown UPS" : data.device.model;
+
+  if (var_name == "ups.mfr") return mfr;
+  if (var_name == "ups.model") return model;
+  if (var_name == "device.mfr") return mfr;
+  if (var_name == "device.model") return model;
+  if (var_name == "device.type") return "ups";
+
+  // Driver identification
   if (var_name == "driver.name") return "usbhid-ups";
   if (var_name == "driver.version") return NUT_VERSION;
   if (var_name == "driver.version.internal") return "ESPHome UPS HID";
 
-  if (ups_hid_) {
-    auto ups_data = ups_hid_->get_ups_data();
+  // Device information
+  if (var_name == "ups.serial" && !data.device.serial_number.empty())
+    return data.device.serial_number;
+  if (var_name == "device.serial" && !data.device.serial_number.empty())
+    return data.device.serial_number;
+  if (var_name == "ups.firmware" && !data.device.firmware_version.empty())
+    return data.device.firmware_version;
 
-    // Device information variables
-    if (var_name == "ups.serial" && !ups_data.device.serial_number.empty()) {
-      return ups_data.device.serial_number;
-    }
-    if (var_name == "device.serial" && !ups_data.device.serial_number.empty()) {
-      return ups_data.device.serial_number;
-    }
-    if (var_name == "ups.firmware" && !ups_data.device.firmware_version.empty()) {
-      return ups_data.device.firmware_version;
-    }
+  // Battery variables
+  if (var_name == "battery.charge") {
+    float level = data.battery.is_valid() ? data.battery.level : NAN;
+    if (!std::isnan(level) && level >= 0) return std::to_string(static_cast<int>(level));
+  }
+  if (var_name == "battery.voltage" && !std::isnan(data.battery.voltage))
+    return format_nut_value(std::to_string(data.battery.voltage));
+  if (var_name == "battery.voltage.nominal" && !std::isnan(data.battery.voltage_nominal))
+    return format_nut_value(std::to_string(data.battery.voltage_nominal));
+  if (var_name == "battery.runtime") {
+    float rt = data.battery.runtime_minutes;
+    if (!std::isnan(rt) && rt > 0) return std::to_string(static_cast<int>(rt * 60));
+  }
+  if (var_name == "battery.type" && !data.battery.type.empty())
+    return data.battery.type;
+  if (var_name == "battery.mfr.date" && !data.battery.mfr_date.empty())
+    return data.battery.mfr_date;
+  if (var_name == "battery.voltage.low" && !std::isnan(data.battery.config_voltage))
+    return format_nut_value(std::to_string(data.battery.config_voltage));
+  if (var_name == "battery.capacity" && !std::isnan(data.battery.design_capacity))
+    return format_nut_value(std::to_string(data.battery.design_capacity));
+  if (var_name == "battery.charge.low" && !std::isnan(data.battery.charge_low))
+    return std::to_string(static_cast<int>(data.battery.charge_low));
+  if (var_name == "battery.charge.warning" && !std::isnan(data.battery.charge_warning))
+    return std::to_string(static_cast<int>(data.battery.charge_warning));
 
-    // Device variables (NUT-compatible aliases)
-    if (var_name == "device.mfr") return get_ups_manufacturer();
-    if (var_name == "device.model") return get_ups_model();
-    if (var_name == "device.type") return "ups";
+  // Input power variables
+  if (var_name == "input.voltage") {
+    float v = data.power.input_voltage;
+    if (!std::isnan(v) && v > 0) return format_nut_value(std::to_string(v));
+  }
+  if (var_name == "input.voltage.nominal" && !std::isnan(data.power.input_voltage_nominal))
+    return format_nut_value(std::to_string(data.power.input_voltage_nominal));
+  if (var_name == "input.frequency" && !std::isnan(data.power.frequency))
+    return format_nut_value(std::to_string(data.power.frequency));
+  if (var_name == "input.transfer.low" && !std::isnan(data.power.input_transfer_low))
+    return format_nut_value(std::to_string(data.power.input_transfer_low));
+  if (var_name == "input.transfer.high" && !std::isnan(data.power.input_transfer_high))
+    return format_nut_value(std::to_string(data.power.input_transfer_high));
 
-    // Battery variables
-    if (var_name == "battery.charge") {
-      float battery_level = ups_hid_->get_battery_level();
-      if (battery_level >= 0) return std::to_string(static_cast<int>(battery_level));
-    }
-    if (var_name == "battery.voltage" && !std::isnan(ups_data.battery.voltage)) {
-      return format_nut_value(std::to_string(ups_data.battery.voltage));
-    }
-    if (var_name == "battery.voltage.nominal" && !std::isnan(ups_data.battery.voltage_nominal)) {
-      return format_nut_value(std::to_string(ups_data.battery.voltage_nominal));
-    }
-    if (var_name == "battery.runtime") {
-      float runtime_minutes = ups_hid_->get_runtime_minutes();
-      if (runtime_minutes > 0) return std::to_string(static_cast<int>(runtime_minutes * 60));
-    }
-    if (var_name == "battery.type" && !ups_data.battery.type.empty()) {
-      return ups_data.battery.type;
-    }
-    if (var_name == "battery.mfr.date" && !ups_data.battery.mfr_date.empty()) {
-      return ups_data.battery.mfr_date;
-    }
-    if (var_name == "battery.voltage.low" && !std::isnan(ups_data.battery.config_voltage)) {
-      return format_nut_value(std::to_string(ups_data.battery.config_voltage));
-    }
-    if (var_name == "battery.capacity" && !std::isnan(ups_data.battery.design_capacity)) {
-      return format_nut_value(std::to_string(ups_data.battery.design_capacity));
-    }
-    if (var_name == "battery.charge.low" && !std::isnan(ups_data.battery.charge_low)) {
-      return std::to_string(static_cast<int>(ups_data.battery.charge_low));
-    }
-    if (var_name == "battery.charge.warning" && !std::isnan(ups_data.battery.charge_warning)) {
-      return std::to_string(static_cast<int>(ups_data.battery.charge_warning));
-    }
-
-    // Input power variables
-    if (var_name == "input.voltage") {
-      float input_voltage = ups_hid_->get_input_voltage();
-      if (input_voltage > 0) return format_nut_value(std::to_string(input_voltage));
-    }
-    if (var_name == "input.voltage.nominal" && !std::isnan(ups_data.power.input_voltage_nominal)) {
-      return format_nut_value(std::to_string(ups_data.power.input_voltage_nominal));
-    }
-    if (var_name == "input.frequency" && !std::isnan(ups_data.power.frequency)) {
-      return format_nut_value(std::to_string(ups_data.power.frequency));
-    }
-    if (var_name == "input.transfer.low" && !std::isnan(ups_data.power.input_transfer_low)) {
-      return format_nut_value(std::to_string(ups_data.power.input_transfer_low));
-    }
-    if (var_name == "input.transfer.high" && !std::isnan(ups_data.power.input_transfer_high)) {
-      return format_nut_value(std::to_string(ups_data.power.input_transfer_high));
-    }
-
-    // Output power variables
-    if (var_name == "output.voltage") {
-      float output_voltage = ups_hid_->get_output_voltage();
-      if (output_voltage > 0) return format_nut_value(std::to_string(output_voltage));
-    }
-    if (var_name == "output.voltage.nominal" && !std::isnan(ups_data.power.output_voltage_nominal)) {
-      return format_nut_value(std::to_string(ups_data.power.output_voltage_nominal));
-    }
-    if (var_name == "output.current" && !std::isnan(ups_data.power.output_current)) {
-      return format_nut_value(std::to_string(ups_data.power.output_current));
-    }
-    if (var_name == "output.frequency" && !std::isnan(ups_data.power.output_frequency)) {
-      return format_nut_value(std::to_string(ups_data.power.output_frequency));
-    }
-    if (var_name == "output.frequency.nominal" && !std::isnan(ups_data.power.input_voltage_nominal)) {
-      // Output frequency nominal - typically matches region (60Hz US, 50Hz EU)
-      // Use the input frequency as reference if available, otherwise estimate from nominal voltage
-      if (!std::isnan(ups_data.power.frequency)) {
-        return std::to_string(static_cast<int>(std::round(ups_data.power.frequency)));
-      }
-      // Estimate from nominal voltage: US/JP=60Hz, EU=50Hz
-      if (!std::isnan(ups_data.power.input_voltage_nominal)) {
-        return ups_data.power.input_voltage_nominal <= 130.0f ? "60" : "50";
-      }
-    }
-
-    // Load and power variables
-    if (var_name == "ups.load") {
-      float load_percent = ups_hid_->get_load_percent();
-      if (load_percent >= 0) return std::to_string(static_cast<int>(load_percent));
-    }
-    if (var_name == "ups.realpower" && !std::isnan(ups_data.power.active_power)) {
-      return std::to_string(static_cast<int>(ups_data.power.active_power));
-    }
-    if (var_name == "ups.realpower.nominal" && !std::isnan(ups_data.power.realpower_nominal)) {
-      return std::to_string(static_cast<int>(ups_data.power.realpower_nominal));
-    }
-    if (var_name == "ups.power.nominal" && !std::isnan(ups_data.power.apparent_power_nominal)) {
-      return std::to_string(static_cast<int>(ups_data.power.apparent_power_nominal));
-    }
-
-    // Beeper status
-    if (var_name == "ups.beeper.status" && !ups_data.config.beeper_status.empty()) {
-      return ups_data.config.beeper_status;
-    }
-
-    // Delay configuration
-    if (var_name == "ups.delay.shutdown" && ups_data.config.delay_shutdown >= 0) {
-      return std::to_string(ups_data.config.delay_shutdown);
-    }
-
-    // Timer values
-    // NUT standard: -1 means inactive/not counting down
-    if (var_name == "ups.timer.shutdown") {
-      if (ups_data.test.timer_shutdown >= 0) {
-        return std::to_string(ups_data.test.timer_shutdown);
-      }
-      return "-1";
-    }
-    if (var_name == "ups.timer.reboot") {
-      if (ups_data.test.timer_reboot >= 0) {
-        return std::to_string(ups_data.test.timer_reboot);
-      }
-      return "-1";
-    }
-
-    // Test result
-    if (var_name == "ups.test.result" && !ups_data.test.ups_test_result.empty()) {
-      return ups_data.test.ups_test_result;
-    }
+  // Output power variables
+  if (var_name == "output.voltage") {
+    float v = data.power.output_voltage;
+    if (!std::isnan(v) && v > 0) return format_nut_value(std::to_string(v));
+  }
+  if (var_name == "output.voltage.nominal" && !std::isnan(data.power.output_voltage_nominal))
+    return format_nut_value(std::to_string(data.power.output_voltage_nominal));
+  if (var_name == "output.current" && !std::isnan(data.power.output_current))
+    return format_nut_value(std::to_string(data.power.output_current));
+  if (var_name == "output.frequency" && !std::isnan(data.power.output_frequency))
+    return format_nut_value(std::to_string(data.power.output_frequency));
+  if (var_name == "output.frequency.nominal" && !std::isnan(data.power.input_voltage_nominal)) {
+    if (!std::isnan(data.power.frequency))
+      return std::to_string(static_cast<int>(std::round(data.power.frequency)));
+    if (!std::isnan(data.power.input_voltage_nominal))
+      return data.power.input_voltage_nominal <= 130.0f ? "60" : "50";
   }
 
-  if (var_name == "ups.status") {
-    return get_ups_status();
+  // Load and power variables
+  if (var_name == "ups.load") {
+    float lp = data.power.load_percent;
+    if (!std::isnan(lp) && lp >= 0) return std::to_string(static_cast<int>(lp));
   }
+  if (var_name == "ups.realpower" && !std::isnan(data.power.active_power))
+    return std::to_string(static_cast<int>(data.power.active_power));
+  if (var_name == "ups.realpower.nominal" && !std::isnan(data.power.realpower_nominal))
+    return std::to_string(static_cast<int>(data.power.realpower_nominal));
+  if (var_name == "ups.power.nominal" && !std::isnan(data.power.apparent_power_nominal))
+    return std::to_string(static_cast<int>(data.power.apparent_power_nominal));
 
-  // Debug diagnostics -- queryable via upsc
+  // Beeper status
+  if (var_name == "ups.beeper.status" && !data.config.beeper_status.empty())
+    return data.config.beeper_status;
+
+  // Delay configuration
+  if (var_name == "ups.delay.shutdown" && data.config.delay_shutdown >= 0)
+    return std::to_string(data.config.delay_shutdown);
+
+  // Timer values (-1 means inactive/not counting down)
+  if (var_name == "ups.timer.shutdown")
+    return std::to_string(data.test.timer_shutdown >= 0 ? data.test.timer_shutdown : -1);
+  if (var_name == "ups.timer.reboot")
+    return std::to_string(data.test.timer_reboot >= 0 ? data.test.timer_reboot : -1);
+
+  // Test result
+  if (var_name == "ups.test.result" && !data.test.ups_test_result.empty())
+    return data.test.ups_test_result;
+
+  // UPS status (built from the snapshot, no extra mutex acquisitions)
+  if (var_name == "ups.status")
+    return get_ups_status(&data);
+
+  // Debug diagnostics
   if (ups_hid_) {
     if (var_name == "ups.debug.read.status") {
-      auto data = ups_hid_->get_ups_data();
       uint32_t age_ms = ups_hid_->get_data_age_ms();
       char buf[128];
       snprintf(buf, sizeof(buf), "proto=%s stale=%u/%u age=%ums",
@@ -1172,11 +1130,9 @@ std::string NutServerComponent::get_ups_var(const std::string &var_name) {
 
     const auto &log = ups_hid_->get_event_log();
 
-    if (var_name == "ups.debug.event.count") {
+    if (var_name == "ups.debug.event.count")
       return std::to_string(log.size());
-    }
 
-    // ups.debug.event.N -- individual event by index (0 = oldest)
     const std::string event_prefix = "ups.debug.event.";
     if (var_name.substr(0, event_prefix.size()) == event_prefix) {
       std::string idx_str = var_name.substr(event_prefix.size());
@@ -1291,10 +1247,9 @@ std::vector<std::string> NutServerComponent::split_args(const std::string &args)
   std::string token;
 
   while (iss >> token) {
-    // Handle quoted strings
     if (token.front() == '"') {
       std::string quoted = token.substr(1);
-      if (quoted.back() != '"') {
+      if (quoted.empty() || quoted.back() != '"') {
         std::string rest;
         std::getline(iss, rest, '"');
         quoted += rest;
@@ -1314,78 +1269,75 @@ bool NutServerComponent::has_ups_data() const {
   return ups_hid_ && ups_hid_->is_connected();
 }
 
-std::string NutServerComponent::get_ups_status() const {
+std::string NutServerComponent::get_ups_status(const ups_hid::UpsData *snapshot) const {
   if (!ups_hid_ || !ups_hid_->is_connected()) {
     return "";
   }
 
-  std::string status;
-  if (ups_hid_->is_online()) {
-    status = "OL";  // Online
-  } else if (ups_hid_->is_on_battery()) {
-    status = "OB";  // On Battery
+  // Use provided snapshot or fetch a fresh one.
+  ups_hid::UpsData local;
+  if (!snapshot) {
+    local = ups_hid_->get_ups_data();
+    snapshot = &local;
   }
 
-  if (ups_hid_->is_low_battery()) {
-    if (!status.empty()) status += " ";
-    status += "LB";  // Low Battery
-  }
+  const auto &d = *snapshot;
 
-  if (ups_hid_->is_charging()) {
-    if (!status.empty()) status += " ";
-    status += "CHRG";  // Charging
-  }
+  // Determine online/on-battery from the data directly (avoids data_mutex_).
+  const auto &s = d.power.status;
+  bool on_battery = (s == "On Battery");
+  bool online = !on_battery && (!s.empty() && s != "Unknown");
+  if (!online && !on_battery)
+    online = d.power.input_voltage_valid();
 
-  // AVR status flags
-  auto ups_data = ups_hid_->get_ups_data();
-  if (ups_data.power.boost_active) {
-    if (!status.empty()) status += " ";
-    status += "BOOST";
-  }
-  if (ups_data.power.buck_active) {
-    if (!status.empty()) status += " ";
-    status += "TRIM";
-  }
-  if (ups_data.power.over_temperature) {
-    if (!status.empty()) status += " ";
-    status += "OVER";
-  }
-  if (ups_data.power.shutdown_imminent) {
-    if (!status.empty()) status += " ";
-    status += "FSD";  // Forced Shutdown (NUT standard for shutdown imminent)
-  }
-  if (ups_data.power.awaiting_power) {
-    if (!status.empty()) status += " ";
-    status += "OFF";  // UPS is off, waiting for power to return
-  }
-  if (ups_data.battery.needs_replacement) {
-    if (!status.empty()) status += " ";
-    status += "RB";  // Replace Battery
-  }
+  std::string result;
+  auto append = [&](const char *flag) {
+    if (!result.empty()) result += ' ';
+    result += flag;
+  };
 
-  if (ups_hid_->has_fault()) {
-    if (!status.empty()) status += " ";
-    status += "ALARM";  // Alarm condition
-  }
+  if (online)      append("OL");
+  else if (on_battery) append("OB");
 
-  return status;
+  if (d.battery.is_low())  append("LB");
+
+  bool charging = online && d.battery.is_valid() &&
+                  !std::isnan(d.battery.level) && d.battery.level < 100.0f;
+  if (charging) append("CHRG");
+
+  if (d.power.boost_active)      append("BOOST");
+  if (d.power.buck_active)       append("TRIM");
+  if (d.power.over_temperature)  append("OVER");
+  if (d.power.shutdown_imminent) append("FSD");
+  if (d.power.awaiting_power)    append("OFF");
+  if (d.battery.needs_replacement) append("RB");
+
+  bool fault = d.power.is_input_out_of_range() ||
+               (!d.power.is_valid() && !d.battery.is_valid());
+  if (fault) append("ALARM");
+
+  return result;
 }
 
-std::string NutServerComponent::get_ups_manufacturer() const {
+std::string NutServerComponent::get_ups_manufacturer(const ups_hid::UpsData *snapshot) const {
   if (ups_hid_) {
-    auto ups_data = ups_hid_->get_ups_data();
-    if (!ups_data.device.manufacturer.empty()) {
-      return ups_data.device.manufacturer;
+    if (snapshot) {
+      if (!snapshot->device.manufacturer.empty()) return snapshot->device.manufacturer;
+    } else {
+      auto d = ups_hid_->get_ups_data();
+      if (!d.device.manufacturer.empty()) return d.device.manufacturer;
     }
   }
   return "Unknown";
 }
 
-std::string NutServerComponent::get_ups_model() const {
+std::string NutServerComponent::get_ups_model(const ups_hid::UpsData *snapshot) const {
   if (ups_hid_) {
-    auto ups_data = ups_hid_->get_ups_data();
-    if (!ups_data.device.model.empty()) {
-      return ups_data.device.model;
+    if (snapshot) {
+      if (!snapshot->device.model.empty()) return snapshot->device.model;
+    } else {
+      auto d = ups_hid_->get_ups_data();
+      if (!d.device.model.empty()) return d.device.model;
     }
   }
   return "Unknown UPS";

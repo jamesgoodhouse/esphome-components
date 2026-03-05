@@ -194,9 +194,11 @@ esp_err_t Esp32UsbTransport::hid_get_report(uint8_t report_type, uint8_t report_
             // Semaphore timed out AFTER the USB transfer should have completed.
             // The callback has NOT fired -- the transfer may still be pending.
             // Intentionally leak the transfer + semaphore to avoid use-after-free.
+            leaked_transfers_++;
             ESP_LOGE(ESP32_USB_TAG, "HID GET_REPORT 0x%02X: semaphore timeout after %ums "
-                     "(USB stack may be stuck, leaking transfer to avoid crash)",
-                     report_id, timeout_ms + timing::USB_SEMAPHORE_GUARD_MS);
+                     "(leaking transfer #%u to avoid crash)",
+                     report_id, timeout_ms + timing::USB_SEMAPHORE_GUARD_MS,
+                     leaked_transfers_.load());
             return ESP_ERR_TIMEOUT;
         }
     } else {
@@ -298,8 +300,10 @@ esp_err_t Esp32UsbTransport::hid_set_report(uint8_t report_type, uint8_t report_
                 ESP_LOGW(ESP32_USB_TAG, "HID SET_REPORT failed");
             }
         } else {
+            leaked_transfers_++;
             ESP_LOGE(ESP32_USB_TAG, "HID SET_REPORT 0x%02X: semaphore timeout "
-                     "(leaking transfer to avoid crash)", report_id);
+                     "(leaking transfer #%u to avoid crash)",
+                     report_id, leaked_transfers_.load());
             return ESP_ERR_TIMEOUT;
         }
     } else {
@@ -438,8 +442,10 @@ esp_err_t Esp32UsbTransport::get_string_descriptor(uint8_t string_index,
                 ret = ESP_FAIL;
             }
         } else {
+            leaked_transfers_++;
             ESP_LOGE(ESP32_USB_TAG, "String descriptor: semaphore timeout "
-                     "(leaking transfer to avoid crash)");
+                     "(leaking transfer #%u to avoid crash)",
+                     leaked_transfers_.load());
             return ESP_ERR_TIMEOUT;
         }
     } else {
@@ -601,8 +607,10 @@ esp_err_t Esp32UsbTransport::get_hid_report_descriptor(std::vector<uint8_t>& des
                 ret = ESP_FAIL;
             }
         } else {
+            leaked_transfers_++;
             ESP_LOGE(ESP32_USB_TAG, "Report descriptor: semaphore timeout "
-                     "(leaking transfer to avoid crash)");
+                     "(leaking transfer #%u to avoid crash)",
+                     leaked_transfers_.load());
             return ESP_ERR_TIMEOUT;
         }
     } else {
@@ -633,11 +641,11 @@ void Esp32UsbTransport::set_last_error(const std::string& error) {
 }
 
 esp_err_t Esp32UsbTransport::setup_usb_host() {
-    // Create USB library task - USB Host installation happens inside the task
     if (!usb_tasks_running_.load()) {
+        usb_lib_task_exited_ = false;
+        usb_client_task_exited_ = false;
         usb_tasks_running_ = true;
 
-        // Create USB Host Library task first
         BaseType_t task_created = xTaskCreate(usb_lib_task, "usb_lib_task", 4096, this, 2, &usb_lib_task_handle_);
         if (task_created != pdTRUE) {
             ESP_LOGE(ESP32_USB_TAG, "Failed to create USB Host Library task");
@@ -645,10 +653,8 @@ esp_err_t Esp32UsbTransport::setup_usb_host() {
             return ESP_FAIL;
         }
 
-        // Give USB Host Library task time to initialize
         vTaskDelay(pdMS_TO_TICKS(100));
 
-        // Create USB client task
         task_created = xTaskCreate(usb_client_task, "usb_client_task", 6144, this, 3, &usb_client_task_handle_);
         if (task_created != pdTRUE) {
             ESP_LOGE(ESP32_USB_TAG, "Failed to create USB client task");
@@ -663,21 +669,22 @@ esp_err_t Esp32UsbTransport::setup_usb_host() {
 }
 
 esp_err_t Esp32UsbTransport::teardown_usb_host() {
-    // Signal tasks to stop (they will self-terminate and handle USB cleanup)
     if (usb_tasks_running_.load()) {
         ESP_LOGI(ESP32_USB_TAG, "Stopping USB Host tasks...");
         usb_tasks_running_ = false;
 
-        // Wait for tasks to self-terminate
-        vTaskDelay(pdMS_TO_TICKS(500)); // Give tasks time to exit cleanly
-
+        // Wait for the client task to exit (it polls usb_tasks_running_ every ~10ms).
+        for (int i = 0; i < 20 && !usb_client_task_exited_.load(); i++) {
+            vTaskDelay(pdMS_TO_TICKS(50));
+        }
+        if (!usb_client_task_exited_.load()) {
+            ESP_LOGW(ESP32_USB_TAG, "USB client task did not exit in time");
+        }
         usb_client_task_handle_ = nullptr;
-        usb_lib_task_handle_ = nullptr;
-
-        ESP_LOGI(ESP32_USB_TAG, "USB Host tasks stopped");
     }
 
-    // Release interface and device
+    // Release interface and close device before deregistering the client so
+    // that the lib task's NO_CLIENTS handler can free remaining devices.
     if (device_.dev_hdl) {
         ESP_LOGI(ESP32_USB_TAG, "Cleaning up device resources");
         usb_host_interface_release(device_.client_hdl, device_.dev_hdl, device_.interface_num);
@@ -691,7 +698,17 @@ esp_err_t Esp32UsbTransport::teardown_usb_host() {
         device_.client_hdl = nullptr;
     }
 
-    // USB Host uninstallation happens inside usb_lib_task now
+    // Deregistering the client fires USB_HOST_LIB_EVENT_FLAGS_NO_CLIENTS which
+    // causes usb_lib_task to call usb_host_uninstall() and exit.  Wait for it.
+    for (int i = 0; i < 60 && !usb_lib_task_exited_.load(); i++) {
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    if (!usb_lib_task_exited_.load()) {
+        ESP_LOGW(ESP32_USB_TAG, "USB lib task did not exit in time");
+    }
+    usb_lib_task_handle_ = nullptr;
+
+    ESP_LOGI(ESP32_USB_TAG, "USB Host tasks stopped");
     return ESP_OK;
 }
 
@@ -843,14 +860,13 @@ esp_err_t Esp32UsbTransport::submit_control_transfer(uint8_t bmRequestType, uint
         return ESP_ERR_INVALID_STATE;
     }
 
-    usb_transfer_t *transfer;
+    usb_transfer_t *transfer = nullptr;
     esp_err_t ret = usb_host_transfer_alloc(sizeof(usb_setup_packet_t) + data_len, 0, &transfer);
     if (ret != ESP_OK) {
         set_last_error("Transfer alloc failed: " + std::string(esp_err_to_name(ret)));
         return ret;
     }
 
-    // Setup packet
     usb_setup_packet_t *setup = (usb_setup_packet_t *)transfer->data_buffer;
     setup->bmRequestType = bmRequestType;
     setup->bRequest = bRequest;
@@ -860,35 +876,69 @@ esp_err_t Esp32UsbTransport::submit_control_transfer(uint8_t bmRequestType, uint
 
     if (data_len > 0 && data) {
         if (bmRequestType & USB_BM_REQUEST_TYPE_DIR_IN) {
-            // IN transfer - device to host
             memset(transfer->data_buffer + sizeof(usb_setup_packet_t), 0, data_len);
         } else {
-            // OUT transfer - host to device
             memcpy(transfer->data_buffer + sizeof(usb_setup_packet_t), data, data_len);
         }
     }
 
     transfer->device_handle = device_.dev_hdl;
-    transfer->bEndpointAddress = 0; // Control endpoint
-    transfer->callback = nullptr;
-    transfer->context = nullptr;
+    transfer->bEndpointAddress = 0;
     transfer->num_bytes = sizeof(usb_setup_packet_t) + data_len;
     transfer->timeout_ms = timeout_ms;
 
+    SemaphoreHandle_t done_sem = xSemaphoreCreateBinary();
+    if (!done_sem) {
+        usb_host_transfer_free(transfer);
+        return ESP_ERR_NO_MEM;
+    }
+
+    struct {
+        SemaphoreHandle_t sem;
+        esp_err_t result;
+        size_t actual_bytes;
+    } ctx = {done_sem, ESP_ERR_TIMEOUT, 0};
+
+    transfer->context = &ctx;
+    transfer->callback = [](usb_transfer_t *t) {
+        auto *c = static_cast<decltype(ctx)*>(t->context);
+        c->result = (t->status == USB_TRANSFER_STATUS_COMPLETED) ? ESP_OK : ESP_FAIL;
+        c->actual_bytes = t->actual_num_bytes;
+        xSemaphoreGive(c->sem);
+    };
+
     ret = usb_host_transfer_submit_control(device_.client_hdl, transfer);
     if (ret != ESP_OK) {
+        vSemaphoreDelete(done_sem);
         usb_host_transfer_free(transfer);
         set_last_error("Control transfer submit failed: " + std::string(esp_err_to_name(ret)));
         return ret;
     }
 
-    // Copy response data back
-    if (data_len > 0 && data && (bmRequestType & USB_BM_REQUEST_TYPE_DIR_IN)) {
-        memcpy(data, transfer->data_buffer + sizeof(usb_setup_packet_t), data_len);
+    TickType_t sem_wait = pdMS_TO_TICKS(timeout_ms + timing::USB_SEMAPHORE_GUARD_MS);
+    if (xSemaphoreTake(done_sem, sem_wait) != pdTRUE) {
+        leaked_transfers_++;
+        ESP_LOGE(ESP32_USB_TAG, "Control transfer semaphore timeout (leaking transfer #%u)",
+                 leaked_transfers_.load());
+        return ESP_ERR_TIMEOUT;
     }
 
+    ret = ctx.result;
+    if (ret == ESP_OK && data_len > 0 && data && (bmRequestType & USB_BM_REQUEST_TYPE_DIR_IN)) {
+        size_t data_received = (ctx.actual_bytes > sizeof(usb_setup_packet_t))
+            ? ctx.actual_bytes - sizeof(usb_setup_packet_t) : 0;
+        size_t copy_len = std::min(data_received, data_len);
+        memcpy(data, transfer->data_buffer + sizeof(usb_setup_packet_t), copy_len);
+    }
+
+    vSemaphoreDelete(done_sem);
     usb_host_transfer_free(transfer);
-    return ESP_OK;
+
+    if (device_gone_pending_.load()) {
+        process_device_gone_locked();
+    }
+
+    return ret;
 }
 
 void Esp32UsbTransport::usb_client_event_callback(const usb_host_client_event_msg_t* event_msg, void* arg) {
@@ -1034,20 +1084,22 @@ void Esp32UsbTransport::usb_lib_task(void* arg) {
 
     ESP_LOGI(ESP32_USB_TAG, "USB Host library installed successfully");
 
-    // Main USB Host event loop - following working prototype pattern
+    // Main USB Host event loop
     bool has_clients = true;
     bool has_devices = false;
 
     while (has_clients && transport->usb_tasks_running_.load()) {
         uint32_t event_flags;
-        ret = usb_host_lib_handle_events(portMAX_DELAY, &event_flags);
+        ret = usb_host_lib_handle_events(pdMS_TO_TICKS(500), &event_flags);
 
+        if (ret == ESP_ERR_TIMEOUT) {
+            continue;
+        }
         if (ret != ESP_OK) {
             ESP_LOGE(ESP32_USB_TAG, "USB Host event handling failed: %s", esp_err_to_name(ret));
             continue;
         }
 
-        // Handle USB Host events (following ESP-IDF v5.4 patterns)
         if (event_flags & USB_HOST_LIB_EVENT_FLAGS_NO_CLIENTS) {
             ESP_LOGI(ESP32_USB_TAG, "No more USB clients");
             if (usb_host_device_free_all() == ESP_OK) {
@@ -1065,11 +1117,11 @@ void Esp32UsbTransport::usb_lib_task(void* arg) {
         }
     }
 
-    // Cleanup USB Host library
     ESP_LOGI(ESP32_USB_TAG, "Uninstalling USB Host library");
     usb_host_uninstall();
 
     ESP_LOGI(ESP32_USB_TAG, "USB Host Library task ending");
+    transport->usb_lib_task_exited_ = true;
     vTaskDelete(nullptr);
 }
 
@@ -1079,26 +1131,34 @@ void Esp32UsbTransport::usb_client_task(void* arg) {
     ESP_LOGI(ESP32_USB_TAG, "USB client task started");
 
     while (transport->usb_tasks_running_.load()) {
-        if (transport->device_.client_hdl) {
-            // Use shorter timeout for more responsive event processing
-            esp_err_t ret = usb_host_client_handle_events(transport->device_.client_hdl, timing::USB_CLIENT_EVENT_TIMEOUT_MS);
+        // Snapshot the handle under the mutex to avoid a data race with
+        // teardown_usb_host() which can clear it concurrently.  We must
+        // NOT hold the mutex during usb_host_client_handle_events() because
+        // the event callback acquires it.
+        usb_host_client_handle_t client_hdl;
+        {
+            std::lock_guard<std::mutex> lock(transport->device_mutex_);
+            client_hdl = transport->device_.client_hdl;
+        }
+
+        if (client_hdl) {
+            esp_err_t ret = usb_host_client_handle_events(client_hdl, timing::USB_CLIENT_EVENT_TIMEOUT_MS);
 
             if (ret == ESP_ERR_TIMEOUT) {
-                // Timeout is normal - continue processing
+                // Normal - continue processing
             } else if (ret != ESP_OK) {
                 ESP_LOGW(ESP32_USB_TAG, "USB client event handling failed: %s", esp_err_to_name(ret));
-                vTaskDelay(pdMS_TO_TICKS(100)); // Brief delay on error
+                vTaskDelay(pdMS_TO_TICKS(100));
             }
         } else {
-            ESP_LOGD(ESP32_USB_TAG, "No USB client handle available");
             vTaskDelay(pdMS_TO_TICKS(100));
         }
 
-        // Small delay to prevent busy-waiting
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 
     ESP_LOGI(ESP32_USB_TAG, "USB client task stopping");
+    transport->usb_client_task_exited_ = true;
     vTaskDelete(nullptr);
 }
 

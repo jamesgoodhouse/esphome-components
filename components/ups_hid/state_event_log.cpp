@@ -24,11 +24,10 @@ void StateEventLog::record(const std::string &timestamp, const std::string &mess
       count_++;
     }
   }
-  // Auto-persist on status changes (not battery level ticks)
   if (message.find("Status:") != std::string::npos ||
       message.find("Initial state:") != std::string::npos ||
       message.find("Boot:") != std::string::npos) {
-    save_to_nvs();
+    nvs_dirty_ = true;
   }
 }
 
@@ -131,6 +130,11 @@ void StateEventLog::load_from_nvs() {
   }
 }
 
+void StateEventLog::flush_nvs_if_dirty() {
+  if (!nvs_dirty_.exchange(false)) return;
+  save_to_nvs();
+}
+
 void StateEventLog::save_to_nvs() const {
   std::lock_guard<std::mutex> lock(mutex_);
 
@@ -148,22 +152,49 @@ void StateEventLog::save_to_nvs() const {
   size_t start_offset = (count_ > to_save) ? count_ - to_save : 0;
   size_t ring_start = (count_ < MAX_EVENT_LOG_ENTRIES) ? 0 : head_;
 
-  nvs_set_u8(handle, NVS_KEY_COUNT, static_cast<uint8_t>(to_save));
+  bool write_ok = true;
 
-  for (size_t i = 0; i < to_save; i++) {
+  err = nvs_set_u8(handle, NVS_KEY_COUNT, static_cast<uint8_t>(to_save));
+  if (err != ESP_OK) {
+    ESP_LOGW(NVS_TAG, "Failed to write count to NVS: %s", esp_err_to_name(err));
+    write_ok = false;
+  }
+
+  for (size_t i = 0; i < to_save && write_ok; i++) {
     size_t idx = (ring_start + start_offset + i) % MAX_EVENT_LOG_ENTRIES;
     char ts_key[12], msg_key[12];
     snprintf(ts_key, sizeof(ts_key), "ts_%zu", i);
     snprintf(msg_key, sizeof(msg_key), "msg_%zu", i);
 
-    nvs_set_str(handle, ts_key, buffer_[idx].timestamp.c_str());
-    nvs_set_str(handle, msg_key, buffer_[idx].message.c_str());
+    err = nvs_set_str(handle, ts_key, buffer_[idx].timestamp.c_str());
+    if (err != ESP_OK) {
+      ESP_LOGW(NVS_TAG, "Failed to write %s to NVS: %s", ts_key, esp_err_to_name(err));
+      write_ok = false;
+      break;
+    }
+    err = nvs_set_str(handle, msg_key, buffer_[idx].message.c_str());
+    if (err != ESP_OK) {
+      ESP_LOGW(NVS_TAG, "Failed to write %s to NVS: %s", msg_key, esp_err_to_name(err));
+      write_ok = false;
+      break;
+    }
   }
 
-  nvs_commit(handle);
+  if (write_ok) {
+    err = nvs_commit(handle);
+    if (err != ESP_OK) {
+      ESP_LOGW(NVS_TAG, "Failed to commit NVS: %s", esp_err_to_name(err));
+      write_ok = false;
+    }
+  }
+
   nvs_close(handle);
 
-  ESP_LOGD(NVS_TAG, "Persisted %zu events to NVS", to_save);
+  if (write_ok) {
+    ESP_LOGD(NVS_TAG, "Persisted %zu events to NVS", to_save);
+  } else {
+    nvs_dirty_ = true;
+  }
 }
 
 std::string StateSnapshot::status_string() const {

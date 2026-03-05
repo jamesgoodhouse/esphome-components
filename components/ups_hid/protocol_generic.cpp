@@ -135,115 +135,137 @@ bool GenericHidProtocol::initialize() {
 bool GenericHidProtocol::read_data(UpsData &data) {
   ESP_LOGV(GEN_TAG, "Reading Generic HID UPS data...");
   
+  static constexpr int MAX_CONSECUTIVE_TIMEOUTS = 5;
   bool success = false;
+  int consecutive_timeouts = 0;
   uint8_t buffer[limits::MAX_HID_REPORT_SIZE];
   size_t buffer_len;
+
+  auto try_read = [&](uint8_t report_id) -> bool {
+    if (consecutive_timeouts >= MAX_CONSECUTIVE_TIMEOUTS) return false;
+    if (read_report(report_id, buffer, buffer_len)) {
+      consecutive_timeouts = 0;
+      return true;
+    }
+    consecutive_timeouts++;
+    return false;
+  };
   
   // Try to read known report types in priority order
   
   // 1. Power Summary (0x0C) - Battery % and runtime (highest priority)
-  if (read_report(0x0C, buffer, buffer_len)) {
+  if (try_read(0x0C)) {
     parse_power_summary(buffer, buffer_len, data);
     success = true;
   }
   
   // 2. Battery status (0x06) - Alternative battery info
-  if (read_report(0x06, buffer, buffer_len)) {
+  if (try_read(0x06)) {
     parse_battery_status(buffer, buffer_len, data);
     success = true;
   }
   
   // 3. Present Status (0x16) - Status flags
-  if (read_report(0x16, buffer, buffer_len)) {
+  if (try_read(0x16)) {
     parse_present_status(buffer, buffer_len, data);
     success = true;
   }
   
   // 4. General status (0x01) - Common status report
-  if (read_report(0x01, buffer, buffer_len)) {
+  if (try_read(0x01)) {
     parse_general_status(buffer, buffer_len, data);
     success = true;
   }
 
   // 5. Input and Output voltages
-  // Report 0x30 is typically input voltage
-  if (read_report(HID_USAGE_POW_VOLTAGE, buffer, buffer_len))
-  {                                                // 0x30
-    parse_voltage(buffer, buffer_len, data, true); // Parse as input
+  if (try_read(HID_USAGE_POW_VOLTAGE))
+  {
+    parse_voltage(buffer, buffer_len, data, true);
     success = true;
   }
 
-  // Report 0x31 is typically output voltage (or sometimes current)
-  if (read_report(0x31, buffer, buffer_len))
-  { // Use direct report ID for output voltage/current
-    // Try to parse as output voltage first
-    parse_voltage(buffer, buffer_len, data, false); // Parse as output
+  if (try_read(0x31))
+  {
+    parse_voltage(buffer, buffer_len, data, false);
     success = true;
   }
 
   // 6. Load percentage - try multiple report IDs
-  if (!std::isnan(data.power.load_percent))
-  {
-    // Check if load percentage was already set by previous parsing
-    ESP_LOGV(GEN_TAG, "Load percentage already set: %.1f%%", data.power.load_percent);
-  }
-  else
-  {
-    read_load_percentage(data);
+  if (consecutive_timeouts < MAX_CONSECUTIVE_TIMEOUTS) {
     if (!std::isnan(data.power.load_percent))
     {
-      success = true;
+      ESP_LOGV(GEN_TAG, "Load percentage already set: %.1f%%", data.power.load_percent);
+    }
+    else
+    {
+      read_load_percentage(data);
+      if (!std::isnan(data.power.load_percent))
+      {
+        success = true;
+      }
     }
   }
 
   // 7. Input sensitivity - use separate reports from load percentage
-  if (read_report(0x1a, buffer, buffer_len))
+  if (try_read(0x1a))
   {
     parse_input_sensitivity(buffer, buffer_len, data, "CyberPower-style");
     success = true;
   }
-  else if (read_report(0x34, buffer, buffer_len))
-  { // Use 0x34 instead of 0x35 to avoid conflict
+  else if (try_read(0x34))
+  {
     parse_input_sensitivity(buffer, buffer_len, data, "APC-style");
     success = true;
   }
 
   // 8. Try to read frequency data
-  float prev_frequency = data.power.frequency;
-  read_frequency_data(data);
-  if (!std::isnan(data.power.frequency) && std::isnan(prev_frequency))
-  {
-    success = true;
+  if (consecutive_timeouts < MAX_CONSECUTIVE_TIMEOUTS) {
+    float prev_frequency = data.power.frequency;
+    read_frequency_data(data);
+    if (!std::isnan(data.power.frequency) && std::isnan(prev_frequency))
+    {
+      success = true;
+    }
   }
 
   // 9. Try to read delay configuration values
-  bool prev_has_delays = data.config.has_timing_config();
-  read_delay_configuration(data);
-  if (data.config.has_timing_config() && !prev_has_delays)
-  {
-    success = true;
+  if (consecutive_timeouts < MAX_CONSECUTIVE_TIMEOUTS) {
+    bool prev_has_delays = data.config.has_timing_config();
+    read_delay_configuration(data);
+    if (data.config.has_timing_config() && !prev_has_delays)
+    {
+      success = true;
+    }
   }
 
   // 10. Try to read beeper status
-  bool prev_has_beeper = data.config.has_beeper_config();
-  read_beeper_status(data);
-  if (data.config.has_beeper_config() && !prev_has_beeper)
-  {
-    success = true;
+  if (consecutive_timeouts < MAX_CONSECUTIVE_TIMEOUTS) {
+    bool prev_has_beeper = data.config.has_beeper_config();
+    read_beeper_status(data);
+    if (data.config.has_beeper_config() && !prev_has_beeper)
+    {
+      success = true;
+    }
+  }
+
+  if (consecutive_timeouts >= MAX_CONSECUTIVE_TIMEOUTS) {
+    ESP_LOGW(GEN_TAG, "Aborting read cycle: %d consecutive report failures", consecutive_timeouts);
   }
 
   // 11. Try any other discovered reports with heuristic parsing
-  if (!success)
+  if (!success && consecutive_timeouts < MAX_CONSECUTIVE_TIMEOUTS)
   {
     for (uint8_t id : available_input_reports_)
     {
+      if (consecutive_timeouts >= MAX_CONSECUTIVE_TIMEOUTS) break;
+
       if (id == 0x01 || id == 0x06 || id == 0x0C || id == 0x16 ||
           id == 0x30 || id == 0x31 || id == 0x50 || id == 0x1A || id == 0x35)
       {
-        continue; // Already tried
+        continue;
       }
 
-      if (read_report(id, buffer, buffer_len))
+      if (try_read(id))
       {
         ESP_LOGV(GEN_TAG, "Trying heuristic parsing for report 0x%02X", id);
         if (parse_unknown_report(buffer, buffer_len, data))

@@ -541,9 +541,13 @@ bool TrippLiteProtocol::read_data_descriptor(UpsData &data) {
     // Step 1: Read ALL available feature reports into a cache.
     // Each report is a separate USB HID GET_REPORT request.
     // Individual reports can fail while others succeed.
+    // If many consecutive reports time out, abort early to avoid blocking for
+    // minutes when the device is unresponsive.
+    static constexpr int MAX_CONSECUTIVE_TIMEOUTS = 5;
     std::map<uint8_t, std::vector<uint8_t>> report_cache;
     int reports_read = 0;
     int reports_failed = 0;
+    int consecutive_timeouts = 0;
     std::vector<uint8_t> to_exclude;
 
     for (uint8_t rid : available_feature_reports_) {
@@ -552,8 +556,16 @@ bool TrippLiteProtocol::read_data_descriptor(UpsData &data) {
             report_cache[rid] = std::move(report.data);
             reports_read++;
             report_fail_count_[rid] = 0;
+            consecutive_timeouts = 0;
         } else {
             reports_failed++;
+            consecutive_timeouts++;
+            if (consecutive_timeouts >= MAX_CONSECUTIVE_TIMEOUTS) {
+                ESP_LOGW(TL_TAG, "Aborting read cycle: %d consecutive report failures "
+                         "(%d read, %d failed so far)",
+                         consecutive_timeouts, reports_read, reports_failed);
+                break;
+            }
             uint8_t &count = report_fail_count_[rid];
             if (count < 255) count++;
             if (count == REPORT_FAIL_THRESHOLD) {
@@ -1134,15 +1146,24 @@ bool TrippLiteProtocol::read_data_descriptor(UpsData &data) {
 bool TrippLiteProtocol::read_data_heuristic(UpsData &data) {
     ESP_LOGV(TL_TAG, "Reading Tripp Lite HID data (heuristic mode)...");
 
-    // Step 1: Read ALL available feature reports
+    static constexpr int MAX_CONSECUTIVE_TIMEOUTS = 5;
     std::map<uint8_t, HidReport> all_reports;
     int reports_read = 0;
+    int consecutive_timeouts = 0;
 
     for (uint8_t rid : available_feature_reports_) {
         HidReport report;
         if (read_hid_report(rid, report) && !report.data.empty()) {
             all_reports[rid] = report;
             reports_read++;
+            consecutive_timeouts = 0;
+        } else {
+            consecutive_timeouts++;
+            if (consecutive_timeouts >= MAX_CONSECUTIVE_TIMEOUTS) {
+                ESP_LOGW(TL_TAG, "Aborting heuristic read: %d consecutive failures "
+                         "(%d read so far)", consecutive_timeouts, reports_read);
+                break;
+            }
         }
     }
 
