@@ -93,7 +93,7 @@ uint16_t Esp32UsbTransport::get_product_id() const {
 esp_err_t Esp32UsbTransport::hid_get_report(uint8_t report_type, uint8_t report_id,
                                            uint8_t* data, size_t* data_len,
                                            uint32_t timeout_ms) {
-    std::lock_guard<std::mutex> lock(device_mutex_);
+    std::unique_lock<std::mutex> lock(device_mutex_);
 
     if (device_gone_pending_.load()) {
         process_device_gone_locked();
@@ -112,11 +112,10 @@ esp_err_t Esp32UsbTransport::hid_get_report(uint8_t report_type, uint8_t report_
     uint8_t buffer[64] = {0};
     size_t expected_len = std::min(*data_len, sizeof(buffer));
 
-    // Create USB control transfer for HID GET_REPORT
     const uint8_t bmRequestType = USB_BM_REQUEST_TYPE_DIR_IN |
                                  USB_BM_REQUEST_TYPE_TYPE_CLASS |
                                  USB_BM_REQUEST_TYPE_RECIP_INTERFACE;
-    const uint8_t bRequest = 0x01; // HID GET_REPORT
+    const uint8_t bRequest = 0x01;
     const uint16_t wValue = (report_type << 8) | report_id;
     const uint16_t wIndex = device_.interface_num;
     const uint16_t wLength = expected_len;
@@ -129,13 +128,11 @@ esp_err_t Esp32UsbTransport::hid_get_report(uint8_t report_type, uint8_t report_
         return ret;
     }
 
-    // Setup control transfer
     transfer->device_handle = device_.dev_hdl;
     transfer->bEndpointAddress = 0;
     transfer->num_bytes = transfer_size;
     transfer->timeout_ms = timeout_ms;
 
-    // Create setup packet
     usb_setup_packet_t *setup = (usb_setup_packet_t*)transfer->data_buffer;
     setup->bmRequestType = bmRequestType;
     setup->bRequest = bRequest;
@@ -143,7 +140,6 @@ esp_err_t Esp32UsbTransport::hid_get_report(uint8_t report_type, uint8_t report_
     setup->wIndex = wIndex;
     setup->wLength = wLength;
 
-    // Use semaphore for synchronous operation
     SemaphoreHandle_t done_sem = xSemaphoreCreateBinary();
     if (!done_sem) {
         usb_host_transfer_free(transfer);
@@ -167,6 +163,10 @@ esp_err_t Esp32UsbTransport::hid_get_report(uint8_t report_type, uint8_t report_
     };
 
     ret = usb_host_transfer_submit_control(device_.client_hdl, transfer);
+
+    // Release mutex before waiting so usb_client_task can process events
+    lock.unlock();
+
     if (ret == ESP_OK) {
         TickType_t sem_wait = pdMS_TO_TICKS(timeout_ms + timing::USB_SEMAPHORE_GUARD_MS);
         if (xSemaphoreTake(done_sem, sem_wait) == pdTRUE) {
@@ -191,9 +191,6 @@ esp_err_t Esp32UsbTransport::hid_get_report(uint8_t report_type, uint8_t report_
                 ret = ESP_FAIL;
             }
         } else {
-            // Semaphore timed out AFTER the USB transfer should have completed.
-            // The callback has NOT fired -- the transfer may still be pending.
-            // Intentionally leak the transfer + semaphore to avoid use-after-free.
             leaked_transfers_++;
             ESP_LOGE(ESP32_USB_TAG, "HID GET_REPORT 0x%02X: semaphore timeout after %ums "
                      "(leaking transfer #%u to avoid crash)",
@@ -209,6 +206,7 @@ esp_err_t Esp32UsbTransport::hid_get_report(uint8_t report_type, uint8_t report_
     vSemaphoreDelete(done_sem);
     usb_host_transfer_free(transfer);
 
+    lock.lock();
     if (device_gone_pending_.load()) {
         process_device_gone_locked();
     }
@@ -219,7 +217,7 @@ esp_err_t Esp32UsbTransport::hid_get_report(uint8_t report_type, uint8_t report_
 esp_err_t Esp32UsbTransport::hid_set_report(uint8_t report_type, uint8_t report_id,
                                            const uint8_t* data, size_t data_len,
                                            uint32_t timeout_ms) {
-    std::lock_guard<std::mutex> lock(device_mutex_);
+    std::unique_lock<std::mutex> lock(device_mutex_);
 
     if (device_gone_pending_.load()) {
         process_device_gone_locked();
@@ -235,11 +233,10 @@ esp_err_t Esp32UsbTransport::hid_set_report(uint8_t report_type, uint8_t report_
     ESP_LOGD(ESP32_USB_TAG, "HID SET_REPORT: type=0x%02X, id=0x%02X, len=%zu",
              report_type, report_id, data_len);
 
-    // Create USB control transfer for HID SET_REPORT
     const uint8_t bmRequestType = USB_BM_REQUEST_TYPE_DIR_OUT |
                                  USB_BM_REQUEST_TYPE_TYPE_CLASS |
                                  USB_BM_REQUEST_TYPE_RECIP_INTERFACE;
-    const uint8_t bRequest = 0x09; // HID SET_REPORT
+    const uint8_t bRequest = 0x09;
     const uint16_t wValue = (report_type << 8) | report_id;
     const uint16_t wIndex = device_.interface_num;
     const uint16_t wLength = data_len;
@@ -252,13 +249,11 @@ esp_err_t Esp32UsbTransport::hid_set_report(uint8_t report_type, uint8_t report_
         return ret;
     }
 
-    // Setup control transfer
     transfer->device_handle = device_.dev_hdl;
     transfer->bEndpointAddress = 0;
     transfer->num_bytes = transfer_size;
     transfer->timeout_ms = timeout_ms;
 
-    // Create setup packet
     usb_setup_packet_t *setup = (usb_setup_packet_t*)transfer->data_buffer;
     setup->bmRequestType = bmRequestType;
     setup->bRequest = bRequest;
@@ -266,17 +261,14 @@ esp_err_t Esp32UsbTransport::hid_set_report(uint8_t report_type, uint8_t report_
     setup->wIndex = wIndex;
     setup->wLength = wLength;
 
-    // Copy data to transfer buffer
     memcpy(transfer->data_buffer + sizeof(usb_setup_packet_t), data, data_len);
 
-    // Use semaphore for synchronous operation
     SemaphoreHandle_t done_sem = xSemaphoreCreateBinary();
     if (!done_sem) {
         usb_host_transfer_free(transfer);
         return ESP_ERR_NO_MEM;
     }
 
-    // Simple context for completion
     struct {
         SemaphoreHandle_t sem;
         esp_err_t result;
@@ -290,6 +282,9 @@ esp_err_t Esp32UsbTransport::hid_set_report(uint8_t report_type, uint8_t report_
     };
 
     ret = usb_host_transfer_submit_control(device_.client_hdl, transfer);
+
+    lock.unlock();
+
     if (ret == ESP_OK) {
         TickType_t sem_wait = pdMS_TO_TICKS(timeout_ms + timing::USB_SEMAPHORE_GUARD_MS);
         if (xSemaphoreTake(done_sem, sem_wait) == pdTRUE) {
@@ -313,6 +308,7 @@ esp_err_t Esp32UsbTransport::hid_set_report(uint8_t report_type, uint8_t report_
     vSemaphoreDelete(done_sem);
     usb_host_transfer_free(transfer);
 
+    lock.lock();
     if (device_gone_pending_.load()) {
         process_device_gone_locked();
     }
@@ -323,7 +319,7 @@ esp_err_t Esp32UsbTransport::hid_set_report(uint8_t report_type, uint8_t report_
 esp_err_t Esp32UsbTransport::get_string_descriptor(uint8_t string_index,
                                                  std::string& result) {
     result.clear();
-    std::lock_guard<std::mutex> lock(device_mutex_);
+    std::unique_lock<std::mutex> lock(device_mutex_);
 
     if (device_gone_pending_.load()) {
         process_device_gone_locked();
@@ -337,11 +333,9 @@ esp_err_t Esp32UsbTransport::get_string_descriptor(uint8_t string_index,
 
     ESP_LOGD(ESP32_USB_TAG, "USB GET_STRING_DESCRIPTOR: index=%d, language_id=0x0409", string_index);
 
-    // USB string descriptors can be up to 255 bytes, but typically much smaller
     const size_t max_string_len = 255;
-    const uint16_t language_id = 0x0409; // English US
+    const uint16_t language_id = 0x0409;
 
-    // USB string descriptor request parameters
     const uint8_t bmRequestType = USB_BM_REQUEST_TYPE_DIR_IN |
                                  USB_BM_REQUEST_TYPE_TYPE_STANDARD |
                                  USB_BM_REQUEST_TYPE_RECIP_DEVICE;
@@ -358,13 +352,11 @@ esp_err_t Esp32UsbTransport::get_string_descriptor(uint8_t string_index,
         return ret;
     }
 
-    // Setup control transfer
     transfer->device_handle = device_.dev_hdl;
-    transfer->bEndpointAddress = 0; // Control endpoint
+    transfer->bEndpointAddress = 0;
     transfer->num_bytes = transfer_size;
     transfer->timeout_ms = timing::USB_CONTROL_TRANSFER_TIMEOUT_MS;
 
-    // Create setup packet
     usb_setup_packet_t *setup = (usb_setup_packet_t*)transfer->data_buffer;
     setup->bmRequestType = bmRequestType;
     setup->bRequest = bRequest;
@@ -372,14 +364,12 @@ esp_err_t Esp32UsbTransport::get_string_descriptor(uint8_t string_index,
     setup->wIndex = wIndex;
     setup->wLength = wLength;
 
-    // Use semaphore for synchronous operation
     SemaphoreHandle_t done_sem = xSemaphoreCreateBinary();
     if (!done_sem) {
         usb_host_transfer_free(transfer);
         return ESP_ERR_NO_MEM;
     }
 
-    // Context for completion
     struct {
         SemaphoreHandle_t sem;
         esp_err_t result;
@@ -395,6 +385,9 @@ esp_err_t Esp32UsbTransport::get_string_descriptor(uint8_t string_index,
     };
 
     ret = usb_host_transfer_submit_control(device_.client_hdl, transfer);
+
+    lock.unlock();
+
     if (ret == ESP_OK) {
         TickType_t sem_wait = pdMS_TO_TICKS(
             timing::USB_CONTROL_TRANSFER_TIMEOUT_MS + timing::USB_SEMAPHORE_GUARD_MS);
@@ -455,6 +448,7 @@ esp_err_t Esp32UsbTransport::get_string_descriptor(uint8_t string_index,
     vSemaphoreDelete(done_sem);
     usb_host_transfer_free(transfer);
 
+    lock.lock();
     if (device_gone_pending_.load()) {
         process_device_gone_locked();
     }
@@ -464,7 +458,7 @@ esp_err_t Esp32UsbTransport::get_string_descriptor(uint8_t string_index,
 
 esp_err_t Esp32UsbTransport::get_hid_report_descriptor(std::vector<uint8_t>& descriptor) {
     descriptor.clear();
-    std::lock_guard<std::mutex> lock(device_mutex_);
+    std::unique_lock<std::mutex> lock(device_mutex_);
 
     if (device_gone_pending_.load()) {
         process_device_gone_locked();
@@ -592,6 +586,9 @@ esp_err_t Esp32UsbTransport::get_hid_report_descriptor(std::vector<uint8_t>& des
     };
 
     ret = usb_host_transfer_submit_control(device_.client_hdl, transfer);
+
+    lock.unlock();
+
     if (ret == ESP_OK) {
         TickType_t sem_wait = pdMS_TO_TICKS(
             timing::USB_CONTROL_TRANSFER_TIMEOUT_MS + timing::USB_SEMAPHORE_GUARD_MS);
@@ -620,6 +617,7 @@ esp_err_t Esp32UsbTransport::get_hid_report_descriptor(std::vector<uint8_t>& des
     vSemaphoreDelete(done_sem);
     usb_host_transfer_free(transfer);
 
+    lock.lock();
     if (device_gone_pending_.load()) {
         process_device_gone_locked();
     }
@@ -850,7 +848,7 @@ esp_err_t Esp32UsbTransport::submit_control_transfer(uint8_t bmRequestType, uint
                                                    uint16_t wValue, uint16_t wIndex,
                                                    uint8_t* data, size_t data_len,
                                                    uint32_t timeout_ms) {
-    std::lock_guard<std::mutex> lock(device_mutex_);
+    std::unique_lock<std::mutex> lock(device_mutex_);
 
     if (device_gone_pending_.load()) {
         process_device_gone_locked();
@@ -915,6 +913,8 @@ esp_err_t Esp32UsbTransport::submit_control_transfer(uint8_t bmRequestType, uint
         return ret;
     }
 
+    lock.unlock();
+
     TickType_t sem_wait = pdMS_TO_TICKS(timeout_ms + timing::USB_SEMAPHORE_GUARD_MS);
     if (xSemaphoreTake(done_sem, sem_wait) != pdTRUE) {
         leaked_transfers_++;
@@ -934,6 +934,7 @@ esp_err_t Esp32UsbTransport::submit_control_transfer(uint8_t bmRequestType, uint
     vSemaphoreDelete(done_sem);
     usb_host_transfer_free(transfer);
 
+    lock.lock();
     if (device_gone_pending_.load()) {
         process_device_gone_locked();
     }
