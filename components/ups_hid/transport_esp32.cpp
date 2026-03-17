@@ -1039,19 +1039,13 @@ void Esp32UsbTransport::handle_device_gone(usb_device_handle_t dev_hdl) {
     // Mark disconnected immediately (atomic, always safe).
     connected_ = false;
 
-    // Try to acquire the mutex for immediate cleanup.  If the mutex is held
-    // (a transfer function is in-flight, or deinitialize is running), we must
-    // NOT block -- that would deadlock the USB client task.  Instead, set
-    // device_gone_pending_ so the mutex holder does the cleanup when done.
-    std::unique_lock<std::mutex> lock(device_mutex_, std::try_to_lock);
-    if (!lock.owns_lock()) {
-        device_gone_pending_ = true;
-        ESP_LOGI(ESP32_USB_TAG, "USB device disconnected (deferred cleanup)");
-        return;
-    }
-
-    ESP_LOGI(ESP32_USB_TAG, "USB device disconnected");
-    process_device_gone_locked();
+    // Always defer cleanup.  This callback runs inside
+    // usb_host_client_handle_events(); calling usb_host_device_close() or
+    // usb_host_interface_release() here can corrupt the library's internal
+    // state.  The deferred flag is picked up by usb_client_task after the
+    // event call returns, or by the next transfer function that holds the mutex.
+    device_gone_pending_ = true;
+    ESP_LOGI(ESP32_USB_TAG, "USB device disconnected (cleanup deferred)");
 }
 
 void Esp32UsbTransport::process_device_gone_locked() {
@@ -1160,6 +1154,14 @@ void Esp32UsbTransport::usb_client_task(void* arg) {
             } else if (ret != ESP_OK) {
                 ESP_LOGW(ESP32_USB_TAG, "USB client event handling failed: %s", esp_err_to_name(ret));
                 vTaskDelay(pdMS_TO_TICKS(100));
+            }
+
+            // Process deferred device-gone cleanup outside the callback context.
+            if (transport->device_gone_pending_.load()) {
+                std::lock_guard<std::mutex> lock(transport->device_mutex_);
+                if (transport->device_gone_pending_.load()) {
+                    transport->process_device_gone_locked();
+                }
             }
         } else {
             vTaskDelay(pdMS_TO_TICKS(100));
