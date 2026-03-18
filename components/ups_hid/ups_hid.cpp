@@ -123,7 +123,7 @@ void UpsHidComponent::update() {
     }
 
     uint32_t leaked = 0;
-    auto *esp_transport = dynamic_cast<Esp32UsbTransport *>(transport_.get());
+    auto *esp_transport = static_cast<Esp32UsbTransport *>(transport_.get());
     if (esp_transport)
       leaked = esp_transport->get_leaked_transfer_count();
 
