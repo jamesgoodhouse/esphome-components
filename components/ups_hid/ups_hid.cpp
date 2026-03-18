@@ -18,6 +18,8 @@
 #include <algorithm>
 #ifdef USE_ESP32
 #include "esp_system.h"
+#include "nvs_flash.h"
+#include "nvs.h"
 #endif
 
 namespace esphome {
@@ -53,9 +55,34 @@ void UpsHidComponent::setup() {
   last_reset_reason_ = std::string(reason) + " (" + std::to_string(static_cast<int>(reason_code)) + ")";
   ESP_LOGI(TAG, "Last reset reason: %s", last_reset_reason_.c_str());
 
-  // Record boot event with reset reason (persisted to NVS)
-  std::string boot_msg = std::string("Boot: reset=") + reason;
-  event_log_.record(format_event_timestamp(), boot_msg);
+  // Read pre-crash diagnostics from NVS (written periodically by update())
+  {
+    nvs_handle_t h;
+    if (nvs_open("ups_diag", NVS_READONLY, &h) == ESP_OK) {
+      uint32_t stack_hwm = 0, heap_free = 0, heap_min = 0, leaked = 0, uptime_s = 0;
+      nvs_get_u32(h, "stack_hwm", &stack_hwm);
+      nvs_get_u32(h, "heap_free", &heap_free);
+      nvs_get_u32(h, "heap_min", &heap_min);
+      nvs_get_u32(h, "leaked", &leaked);
+      nvs_get_u32(h, "uptime_s", &uptime_s);
+      nvs_close(h);
+
+      ESP_LOGI(TAG, "Pre-crash diagnostics (from %us uptime): "
+               "usb_read stack=%u, heap free=%u, heap min=%u, leaked transfers=%u",
+               uptime_s, stack_hwm, heap_free, heap_min, leaked);
+
+      std::string boot_msg = std::string("Boot: reset=") + reason +
+          " | pre-crash: stack=" + std::to_string(stack_hwm) +
+          " heap=" + std::to_string(heap_free) +
+          " heap_min=" + std::to_string(heap_min) +
+          " leaked=" + std::to_string(leaked) +
+          " uptime=" + std::to_string(uptime_s) + "s";
+      event_log_.record(format_event_timestamp(), boot_msg);
+    } else {
+      std::string boot_msg = std::string("Boot: reset=") + reason;
+      event_log_.record(format_event_timestamp(), boot_msg);
+    }
+  }
 #endif
 
   if (!initialize_transport()) {
@@ -75,14 +102,46 @@ void UpsHidComponent::setup() {
 }
 
 void UpsHidComponent::update() {
-  // update() runs on ESPHome's main loop -- MUST NEVER block on USB I/O.
-  // The background task does all USB reads/writes and sets new_data_available_.
   check_task_health();
 
   if (new_data_available_.exchange(false)) {
     update_sensors();
     check_state_changes();
   }
+
+#ifdef USE_ESP32
+  // Persist runtime diagnostics to NVS every 60s so they survive a crash.
+  uint32_t now = millis();
+  if (now - last_stack_check_ms_ > 60000) {
+    last_stack_check_ms_ = now;
+
+    uint32_t stack_hwm = 0;
+    if (usb_read_task_handle_) {
+      stack_hwm = uxTaskGetStackHighWaterMark(usb_read_task_handle_);
+      if (stack_hwm < 512)
+        ESP_LOGW(TAG, "ups_usb_read stack low: %u bytes free", stack_hwm);
+    }
+
+    uint32_t leaked = 0;
+    auto *esp_transport = dynamic_cast<Esp32UsbTransport *>(transport_.get());
+    if (esp_transport)
+      leaked = esp_transport->get_leaked_transfer_count();
+
+    uint32_t heap_free = esp_get_free_heap_size();
+    uint32_t heap_min = esp_get_minimum_free_heap_size();
+
+    nvs_handle_t h;
+    if (nvs_open("ups_diag", NVS_READWRITE, &h) == ESP_OK) {
+      nvs_set_u32(h, "stack_hwm", stack_hwm);
+      nvs_set_u32(h, "heap_free", heap_free);
+      nvs_set_u32(h, "heap_min", heap_min);
+      nvs_set_u32(h, "leaked", leaked);
+      nvs_set_u32(h, "uptime_s", now / 1000);
+      nvs_commit(h);
+      nvs_close(h);
+    }
+  }
+#endif
 }
 
 void UpsHidComponent::check_task_health() {

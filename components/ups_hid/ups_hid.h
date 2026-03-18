@@ -211,6 +211,7 @@ namespace esphome
     // Fast polling for timer countdown (managed by background task)
     bool fast_polling_mode_{false};
     uint32_t last_waiting_log_{0};
+    uint32_t last_stack_check_ms_{0};
       static constexpr uint32_t FAST_POLL_INTERVAL_MS = 2000;
 
       // Error rate limiting to prevent log spam
