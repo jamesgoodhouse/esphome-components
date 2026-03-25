@@ -87,6 +87,7 @@ esp_err_t Esp32UsbTransport::deinitialize() {
     std::lock_guard<std::mutex> lock(device_mutex_);
 
     device_gone_pending_ = false;
+    new_device_pending_ = false;
 
     esp_err_t ret = teardown_usb_host();
     if (ret != ESP_OK) {
@@ -204,8 +205,6 @@ esp_err_t Esp32UsbTransport::hid_get_report(uint8_t report_type, uint8_t report_
                 ret = ESP_FAIL;
             }
         } else {
-            // Timeout: leak transfer, semaphore, AND ctx so the callback
-            // can safely write to them whenever it eventually fires.
             leaked_transfers_++;
             ESP_LOGE(ESP32_USB_TAG, "HID GET_REPORT 0x%02X: semaphore timeout after %ums "
                      "(leaking transfer #%u to avoid crash)",
@@ -216,6 +215,9 @@ esp_err_t Esp32UsbTransport::hid_get_report(uint8_t report_type, uint8_t report_
     } else {
         ESP_LOGW(ESP32_USB_TAG, "Failed to submit HID GET_REPORT 0x%02X: %s",
                  report_id, esp_err_to_name(ret));
+        if (ret == ESP_ERR_INVALID_STATE) {
+            connected_ = false;
+        }
     }
 
     delete ctx;
@@ -317,6 +319,9 @@ esp_err_t Esp32UsbTransport::hid_set_report(uint8_t report_type, uint8_t report_
         }
     } else {
         ESP_LOGW(ESP32_USB_TAG, "Failed to submit HID SET_REPORT: %s", esp_err_to_name(ret));
+        if (ret == ESP_ERR_INVALID_STATE) {
+            connected_ = false;
+        }
     }
 
     delete ctx;
@@ -454,6 +459,9 @@ esp_err_t Esp32UsbTransport::get_string_descriptor(uint8_t string_index,
         }
     } else {
         ESP_LOGW(ESP32_USB_TAG, "Failed to submit string descriptor request: %s", esp_err_to_name(ret));
+        if (ret == ESP_ERR_INVALID_STATE) {
+            connected_ = false;
+        }
     }
 
     delete ctx;
@@ -620,6 +628,9 @@ esp_err_t Esp32UsbTransport::get_hid_report_descriptor(std::vector<uint8_t>& des
         }
     } else {
         ESP_LOGW(ESP32_USB_TAG, "Failed to submit report descriptor request: %s", esp_err_to_name(ret));
+        if (ret == ESP_ERR_INVALID_STATE) {
+            connected_ = false;
+        }
     }
 
     delete ctx;
@@ -912,6 +923,9 @@ esp_err_t Esp32UsbTransport::submit_control_transfer(uint8_t bmRequestType, uint
 
     ret = usb_host_transfer_submit_control(device_.client_hdl, transfer);
     if (ret != ESP_OK) {
+        if (ret == ESP_ERR_INVALID_STATE) {
+            connected_ = false;
+        }
         delete ctx;
         vSemaphoreDelete(done_sem);
         usb_host_transfer_free(transfer);
@@ -952,14 +966,20 @@ esp_err_t Esp32UsbTransport::submit_control_transfer(uint8_t bmRequestType, uint
 void Esp32UsbTransport::usb_client_event_callback(const usb_host_client_event_msg_t* event_msg, void* arg) {
     Esp32UsbTransport* transport = static_cast<Esp32UsbTransport*>(arg);
 
+    // CRITICAL: This callback runs INSIDE usb_host_client_handle_events().
+    // Calling any USB host library function here (device_open, interface_claim,
+    // device_close, etc.) is re-entrant and can corrupt internal state.
+    // Only set flags; actual processing happens in usb_client_task after the
+    // event-handling call returns.
     switch (event_msg->event) {
         case USB_HOST_CLIENT_EVENT_NEW_DEV:
-            ESP_LOGI(ESP32_USB_TAG, "New USB device detected: address=%d", event_msg->new_dev.address);
-            transport->handle_new_device(event_msg->new_dev.address);
+            ESP_LOGI(ESP32_USB_TAG, "New USB device detected (deferred): address=%d", event_msg->new_dev.address);
+            transport->new_device_address_.store(event_msg->new_dev.address);
+            transport->new_device_pending_.store(true);
             break;
 
         case USB_HOST_CLIENT_EVENT_DEV_GONE:
-            ESP_LOGI(ESP32_USB_TAG, "USB device disconnected");
+            ESP_LOGI(ESP32_USB_TAG, "USB device disconnected (cleanup deferred)");
             transport->handle_device_gone(event_msg->dev_gone.dev_hdl);
             break;
 
@@ -1036,16 +1056,8 @@ void Esp32UsbTransport::handle_new_device_locked(uint8_t dev_addr) {
 }
 
 void Esp32UsbTransport::handle_device_gone(usb_device_handle_t dev_hdl) {
-    // Mark disconnected immediately (atomic, always safe).
     connected_ = false;
-
-    // Always defer cleanup.  This callback runs inside
-    // usb_host_client_handle_events(); calling usb_host_device_close() or
-    // usb_host_interface_release() here can corrupt the library's internal
-    // state.  The deferred flag is picked up by usb_client_task after the
-    // event call returns, or by the next transfer function that holds the mutex.
     device_gone_pending_ = true;
-    ESP_LOGI(ESP32_USB_TAG, "USB device disconnected (cleanup deferred)");
 }
 
 void Esp32UsbTransport::process_device_gone_locked() {
@@ -1156,12 +1168,20 @@ void Esp32UsbTransport::usb_client_task(void* arg) {
                 vTaskDelay(pdMS_TO_TICKS(100));
             }
 
-            // Process deferred device-gone cleanup outside the callback context.
+            // Process deferred events OUTSIDE the callback context where it is
+            // safe to call USB host library functions.  Order matters: clean up
+            // the old device before opening a new one.
             if (transport->device_gone_pending_.load()) {
                 std::lock_guard<std::mutex> lock(transport->device_mutex_);
                 if (transport->device_gone_pending_.load()) {
                     transport->process_device_gone_locked();
                 }
+            }
+
+            if (transport->new_device_pending_.load()) {
+                transport->new_device_pending_.store(false);
+                uint8_t addr = transport->new_device_address_.load();
+                transport->handle_new_device(addr);
             }
         } else {
             vTaskDelay(pdMS_TO_TICKS(100));

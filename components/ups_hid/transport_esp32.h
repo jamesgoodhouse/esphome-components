@@ -71,9 +71,13 @@ private:
     std::atomic<bool> connected_{false};
     std::atomic<bool> initialized_{false};
 
-    // Set by handle_device_gone() when it can't acquire device_mutex_.
-    // The next transfer function (which holds the mutex) will do the cleanup.
+    // Deferred event flags.  The USB client event callback runs inside
+    // usb_host_client_handle_events(); calling USB host library functions
+    // from that context is re-entrant and unsafe.  Instead, callbacks just
+    // set these flags and usb_client_task processes them after the call returns.
     std::atomic<bool> device_gone_pending_{false};
+    std::atomic<bool> new_device_pending_{false};
+    std::atomic<uint8_t> new_device_address_{0};
 
     // USB Host Library management
     TaskHandle_t usb_lib_task_handle_{nullptr};

@@ -313,6 +313,29 @@ void UpsHidComponent::usb_read_loop() {
     uint32_t interval = get_update_interval();
 
     if (!transport_ || !transport_->is_connected()) {
+      // If we had an active protocol, the transport just broke (e.g. HCD pipe
+      // went INVALID_STATE).  Tear down and rebuild immediately instead of
+      // waiting for the 60s stale-data timer.
+      if (active_protocol_) {
+        ESP_LOGW(TAG, "Transport disconnected while protocol was active - reinitializing");
+        active_protocol_.reset();
+        { std::lock_guard<std::mutex> lock(data_mutex_); cached_protocol_name_ = protocol::NONE; }
+        report_map_.reset();
+        consecutive_failures_ = 0;
+        if (transport_) {
+          transport_->deinitialize();
+          vTaskDelay(pdMS_TO_TICKS(1000));
+          esp_err_t ret = transport_->initialize();
+          if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Transport reinitialization failed: %s",
+                     transport_->get_last_error().c_str());
+          } else {
+            ESP_LOGI(TAG, "Transport reinitialized after pipe failure");
+          }
+        }
+        continue;
+      }
+
       if (now - last_waiting_log_ > 30000) {
         ESP_LOGW(TAG, "Waiting for USB device (transport %s, connected: %s)",
                  transport_ ? "present" : "null",
