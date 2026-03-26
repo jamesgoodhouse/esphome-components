@@ -1092,20 +1092,29 @@ void Esp32UsbTransport::usb_lib_task(void* arg) {
     };
 
     esp_err_t ret = usb_host_install(&host_config);
+    if (ret == ESP_ERR_INVALID_STATE) {
+        ESP_LOGW(ESP32_USB_TAG, "USB Host install returned INVALID_STATE, retrying after delay...");
+        vTaskDelay(pdMS_TO_TICKS(500));
+        ret = usb_host_install(&host_config);
+    }
     if (ret != ESP_OK) {
         ESP_LOGE(ESP32_USB_TAG, "USB Host install failed: %s", esp_err_to_name(ret));
-        transport->usb_tasks_running_ = false; // Stop other tasks
+        transport->usb_tasks_running_ = false;
+        transport->usb_lib_task_exited_ = true;
         vTaskDelete(nullptr);
         return;
     }
 
     ESP_LOGI(ESP32_USB_TAG, "USB Host library installed successfully");
 
-    // Main USB Host event loop
+    // Main USB Host event loop.  The loop must keep running while the
+    // device-free sequence is in progress (has_devices == true) even after
+    // usb_tasks_running_ goes false, otherwise usb_host_uninstall() is
+    // called before ALL_FREE fires and the next usb_host_install() fails.
     bool has_clients = true;
     bool has_devices = false;
 
-    while (has_clients && transport->usb_tasks_running_.load()) {
+    while (has_clients && (has_devices || transport->usb_tasks_running_.load())) {
         uint32_t event_flags;
         ret = usb_host_lib_handle_events(pdMS_TO_TICKS(500), &event_flags);
 
