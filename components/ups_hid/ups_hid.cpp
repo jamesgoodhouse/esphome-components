@@ -356,8 +356,7 @@ void UpsHidComponent::usb_read_loop() {
         consecutive_failures_++;
         ESP_LOGW(TAG, log_messages::DETECTION_FAILED, consecutive_failures_);
 
-        // After 10 consecutive detection failures, reinitialize the USB transport
-        static constexpr uint32_t TRANSPORT_RESET_THRESHOLD = 10;
+        static constexpr uint32_t TRANSPORT_RESET_THRESHOLD = 3;
         if (consecutive_failures_ > 0 &&
             consecutive_failures_ % TRANSPORT_RESET_THRESHOLD == 0) {
           ESP_LOGW(TAG, "Reinitializing USB transport after %u detection failures",
@@ -373,13 +372,12 @@ void UpsHidComponent::usb_read_loop() {
               ESP_LOGI(TAG, "Transport reinitialized, retrying detection");
             }
           }
+          continue;
         }
 
-        // Exponential backoff: 5s, 10s, 20s, 30s, 30s, ...
-        uint32_t shift = consecutive_failures_ < 3 ? consecutive_failures_ : 3;
-        uint32_t backoff = interval * (1 << shift);
-        if (backoff > 30000) backoff = 30000;
-        vTaskDelay(pdMS_TO_TICKS(backoff));
+        // Brief backoff between detection retries (5s constant — no exponential
+        // growth since we reinit the transport after TRANSPORT_RESET_THRESHOLD).
+        vTaskDelay(pdMS_TO_TICKS(5000));
         continue;
       }
     }
