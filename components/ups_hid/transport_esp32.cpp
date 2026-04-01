@@ -79,13 +79,14 @@ esp_err_t Esp32UsbTransport::deinitialize() {
 
     ESP_LOGI(ESP32_USB_TAG, "Deinitializing ESP32 USB transport");
 
-    // Signal callbacks BEFORE taking the mutex so handle_device_gone() and
-    // handle_new_device() bail out immediately instead of blocking.
+    // Signal early so callbacks and the client task bail out quickly.
+    // These MUST be set before teardown_usb_host() waits for the client
+    // task, because the client task checks them on every loop iteration.
+    // Do NOT hold device_mutex_ here — teardown_usb_host() waits for the
+    // client task to exit, and that task acquires device_mutex_ each loop.
+    // Holding the mutex here would deadlock.
     initialized_ = false;
     connected_ = false;
-
-    std::lock_guard<std::mutex> lock(device_mutex_);
-
     device_gone_pending_ = false;
     new_device_pending_ = false;
 
