@@ -678,8 +678,11 @@ esp_err_t Esp32UsbTransport::teardown_usb_host() {
         ESP_LOGI(ESP32_USB_TAG, "Stopping USB Host tasks...");
         usb_tasks_running_ = false;
 
-        // Wait for the client task to exit (it polls usb_tasks_running_ every ~10ms).
-        for (int i = 0; i < 20 && !usb_client_task_exited_.load(); i++) {
+        // Wait for the client task to exit.  The task polls usb_tasks_running_
+        // every ~10ms, but if it's mid-way through process_device_gone_locked()
+        // (which has drain loops of up to ~1s), one iteration can take longer.
+        // Allow up to 3 seconds.
+        for (int i = 0; i < 60 && !usb_client_task_exited_.load(); i++) {
             vTaskDelay(pdMS_TO_TICKS(50));
         }
         if (!usb_client_task_exited_.load()) {
@@ -688,41 +691,42 @@ esp_err_t Esp32UsbTransport::teardown_usb_host() {
         usb_client_task_handle_ = nullptr;
     }
 
-    // The client task is gone, but there may be pending transfer callbacks
-    // (leaked transfers from semaphore timeouts during detection/read).
-    // Drain them now — usb_host_client_handle_events() delivers the callbacks
-    // and the USB host library won't let us release the interface or close the
-    // device until all in-flight URBs have been retired.
-    if (device_.client_hdl) {
-        for (int i = 0; i < 10; i++) {
-            esp_err_t ev_ret = usb_host_client_handle_events(device_.client_hdl, pdMS_TO_TICKS(50));
-            if (ev_ret == ESP_ERR_TIMEOUT) break;
-        }
-    }
+    // If the client task was in the middle of process_device_gone_locked() it
+    // may have already released the interface and closed the device.  Re-check
+    // under the mutex to avoid double-release/close.
+    {
+        std::lock_guard<std::mutex> lock(device_mutex_);
+        // Snapshot and clear — we own cleanup from here.
+        usb_device_handle_t dev = device_.dev_hdl;
+        usb_host_client_handle_t cli = device_.client_hdl;
+        device_.dev_hdl = nullptr;
 
-    // Release interface and close device before deregistering the client so
-    // that the lib task's NO_CLIENTS handler can free remaining devices.
-    if (device_.dev_hdl) {
-        ESP_LOGI(ESP32_USB_TAG, "Cleaning up device resources");
-        usb_host_interface_release(device_.client_hdl, device_.dev_hdl, device_.interface_num);
-
-        // Drain again after interface release — canceling the interface's
-        // endpoints may produce additional completed/canceled URBs.
-        if (device_.client_hdl) {
+        if (cli) {
+            // Drain pending transfer callbacks so the library retires all URBs.
             for (int i = 0; i < 10; i++) {
-                esp_err_t ev_ret = usb_host_client_handle_events(device_.client_hdl, pdMS_TO_TICKS(50));
+                esp_err_t ev_ret = usb_host_client_handle_events(cli, pdMS_TO_TICKS(50));
                 if (ev_ret == ESP_ERR_TIMEOUT) break;
             }
         }
 
-        usb_host_device_close(device_.client_hdl, device_.dev_hdl);
-        device_.dev_hdl = nullptr;
-    }
+        if (dev && cli) {
+            ESP_LOGI(ESP32_USB_TAG, "Cleaning up device resources");
+            usb_host_interface_release(cli, dev, device_.interface_num);
 
-    if (device_.client_hdl) {
-        ESP_LOGI(ESP32_USB_TAG, "Deregistering USB client");
-        usb_host_client_deregister(device_.client_hdl);
-        device_.client_hdl = nullptr;
+            // Drain again — interface release may cancel endpoint URBs.
+            for (int i = 0; i < 10; i++) {
+                esp_err_t ev_ret = usb_host_client_handle_events(cli, pdMS_TO_TICKS(50));
+                if (ev_ret == ESP_ERR_TIMEOUT) break;
+            }
+
+            usb_host_device_close(cli, dev);
+        }
+
+        if (cli) {
+            ESP_LOGI(ESP32_USB_TAG, "Deregistering USB client");
+            usb_host_client_deregister(cli);
+            device_.client_hdl = nullptr;
+        }
     }
 
     // Deregistering the client fires USB_HOST_LIB_EVENT_FLAGS_NO_CLIENTS which
@@ -1054,6 +1058,9 @@ void Esp32UsbTransport::handle_new_device_locked(uint8_t dev_addr) {
                     ESP_LOGI(ESP32_USB_TAG, "UPS device successfully configured and ready");
                     return;
                 }
+                // find_endpoints failed — release the interface we just claimed
+                // so usb_host_device_close() below doesn't hit ESP_ERR_INVALID_STATE.
+                usb_host_interface_release(device_.client_hdl, device_.dev_hdl, device_.interface_num);
             }
         } else {
             ESP_LOGW(ESP32_USB_TAG, "Connected device is not a HID device (class=0x%02X)", device_desc->bDeviceClass);

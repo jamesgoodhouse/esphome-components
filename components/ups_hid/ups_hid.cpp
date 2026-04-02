@@ -123,9 +123,10 @@ void UpsHidComponent::update() {
     }
 
     uint32_t leaked = 0;
-    auto *esp_transport = static_cast<Esp32UsbTransport *>(transport_.get());
-    if (esp_transport)
+    if (!simulation_mode_ && transport_) {
+      auto *esp_transport = static_cast<Esp32UsbTransport *>(transport_.get());
       leaked = esp_transport->get_leaked_transfer_count();
+    }
 
     uint32_t heap_free = esp_get_free_heap_size();
     uint32_t heap_min = esp_get_minimum_free_heap_size();
