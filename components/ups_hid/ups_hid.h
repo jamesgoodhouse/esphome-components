@@ -172,7 +172,7 @@ namespace esphome
 
       bool connected_{false};
       std::atomic<uint32_t> last_successful_read_{0};
-      uint32_t consecutive_failures_{0};
+      std::atomic<uint32_t> consecutive_failures_{0};
       uint32_t max_consecutive_failures_{5};
       static constexpr uint32_t DATA_STALE_TIMEOUT_MS = 60000;  // 60s without successful read → reset
       UpsData ups_data_;

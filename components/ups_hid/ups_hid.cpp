@@ -354,13 +354,13 @@ void UpsHidComponent::usb_read_loop() {
         consecutive_failures_ = 0;
       } else {
         consecutive_failures_++;
-        ESP_LOGW(TAG, log_messages::DETECTION_FAILED, consecutive_failures_);
+        ESP_LOGW(TAG, log_messages::DETECTION_FAILED, consecutive_failures_.load());
 
         static constexpr uint32_t TRANSPORT_RESET_THRESHOLD = 3;
         if (consecutive_failures_ > 0 &&
             consecutive_failures_ % TRANSPORT_RESET_THRESHOLD == 0) {
           ESP_LOGW(TAG, "Reinitializing USB transport after %u detection failures",
-                   consecutive_failures_);
+                   consecutive_failures_.load());
           if (transport_) {
             transport_->deinitialize();
             vTaskDelay(pdMS_TO_TICKS(1000));
@@ -396,7 +396,7 @@ void UpsHidComponent::usb_read_loop() {
       recovery_attempts_ = 0;
     } else {
       consecutive_failures_++;
-      ESP_LOGW(TAG, log_messages::READ_FAILED, consecutive_failures_);
+      ESP_LOGW(TAG, log_messages::READ_FAILED, consecutive_failures_.load());
       if (consecutive_failures_ > max_consecutive_failures_) {
         ESP_LOGW(TAG, log_messages::RESETTING_PROTOCOL);
         active_protocol_.reset();
@@ -484,6 +484,7 @@ esp_err_t UpsHidComponent::hid_set_report(uint8_t report_type, uint8_t report_id
   if (!transport_) {
     return ESP_ERR_INVALID_STATE;
   }
+  usb_task_heartbeat_.store(millis());
   return transport_->hid_set_report(report_type, report_id, data, data_len, timeout_ms);
 }
 
@@ -491,6 +492,7 @@ esp_err_t UpsHidComponent::get_string_descriptor(uint8_t string_index, std::stri
   if (!transport_) {
     return ESP_ERR_INVALID_STATE;
   }
+  usb_task_heartbeat_.store(millis());
   return transport_->get_string_descriptor(string_index, result);
 }
 
@@ -498,6 +500,7 @@ esp_err_t UpsHidComponent::get_hid_report_descriptor(std::vector<uint8_t>& descr
   if (!transport_) {
     return ESP_ERR_INVALID_STATE;
   }
+  usb_task_heartbeat_.store(millis());
   return transport_->get_hid_report_descriptor(descriptor);
 }
 

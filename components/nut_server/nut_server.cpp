@@ -90,8 +90,17 @@ bool NutServerComponent::start_server() {
 
   // Set non-blocking mode
   int flags = fcntl(server_socket_, F_GETFL, 0);
+  if (flags < 0) {
+    ESP_LOGE(TAG, "Failed to get socket flags: %d", errno);
+    close(server_socket_);
+    server_socket_ = -1;
+    return false;
+  }
   if (fcntl(server_socket_, F_SETFL, flags | O_NONBLOCK) < 0) {
-    ESP_LOGW(TAG, "Failed to set non-blocking mode: %d", errno);
+    ESP_LOGE(TAG, "Failed to set non-blocking mode: %d", errno);
+    close(server_socket_);
+    server_socket_ = -1;
+    return false;
   }
 
   // Bind to port
@@ -149,14 +158,16 @@ void NutServerComponent::stop_server() {
     server_socket_ = -1;
   }
 
-  // Wait for server task to exit on its own (max 5s)
+  // Wait for server task to exit on its own (max 5s).
+  // Do NOT vTaskDelete — the task may hold clients_mutex_, and deleting a
+  // task that owns a std::mutex is undefined behavior (the mutex stays
+  // locked forever, deadlocking future lock attempts).
   if (server_task_handle_) {
     for (int i = 0; i < 50 && !server_task_exited_.load(); i++) {
       vTaskDelay(pdMS_TO_TICKS(100));
     }
     if (!server_task_exited_.load()) {
-      ESP_LOGW(TAG, "Server task did not exit in time, force deleting");
-      vTaskDelete(server_task_handle_);
+      ESP_LOGW(TAG, "Server task did not exit in time (will self-exit on next loop)");
     }
     server_task_handle_ = nullptr;
   }
@@ -217,7 +228,11 @@ void NutServerComponent::accept_clients() {
 
     // Set client socket to non-blocking
     int flags = fcntl(client_socket, F_GETFL, 0);
-    fcntl(client_socket, F_SETFL, flags | O_NONBLOCK);
+    if (flags < 0 || fcntl(client_socket, F_SETFL, flags | O_NONBLOCK) < 0) {
+      ESP_LOGW(TAG, "Failed to set client socket non-blocking: %d", errno);
+      close(client_socket);
+      continue;
+    }
 
     // Enable TCP keepalive to detect dead connections faster
     int keepAlive = 1;

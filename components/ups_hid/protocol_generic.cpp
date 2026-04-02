@@ -758,7 +758,7 @@ bool GenericHidProtocol::parse_unknown_report(uint8_t *data, size_t len, UpsData
   }
 
   // Look for voltage values (16-bit, 80-300V range)
-  for (size_t i = 1; i <= len - 2; i++)
+  for (size_t i = 1; len >= 2 && i <= len - 2; i++)
   {
     uint16_t value = data[i] | (data[i + 1] << 8);
     float voltage = static_cast<float>(value);

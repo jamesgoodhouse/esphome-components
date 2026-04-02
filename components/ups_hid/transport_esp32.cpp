@@ -44,8 +44,6 @@ Esp32UsbTransport::~Esp32UsbTransport() {
 }
 
 esp_err_t Esp32UsbTransport::initialize() {
-    std::lock_guard<std::mutex> lock(device_mutex_);
-
     if (initialized_.load()) {
         return ESP_OK;
     }
@@ -58,8 +56,14 @@ esp_err_t Esp32UsbTransport::initialize() {
         return ret;
     }
 
-    // Register USB client for device events - connection will be asynchronous
-    ret = find_and_open_device();
+    // Hold the mutex for find_and_open_device() since it writes to device_.*
+    // members.  Release it BEFORE teardown_usb_host() on failure — the client
+    // task acquires device_mutex_ every loop iteration, so holding it while
+    // waiting for the client task to exit would deadlock.
+    {
+        std::lock_guard<std::mutex> lock(device_mutex_);
+        ret = find_and_open_device();
+    }
     if (ret != ESP_OK) {
         teardown_usb_host();
         return ret;
@@ -118,7 +122,6 @@ esp_err_t Esp32UsbTransport::hid_get_report(uint8_t report_type, uint8_t report_
     std::unique_lock<std::mutex> lock(device_mutex_);
 
     if (device_gone_pending_.load()) {
-        process_device_gone_locked();
         return ESP_ERR_INVALID_STATE;
     }
     if (!device_.dev_hdl) {
@@ -225,11 +228,6 @@ esp_err_t Esp32UsbTransport::hid_get_report(uint8_t report_type, uint8_t report_
     vSemaphoreDelete(done_sem);
     usb_host_transfer_free(transfer);
 
-    lock.lock();
-    if (device_gone_pending_.load()) {
-        process_device_gone_locked();
-    }
-
     return ret;
 }
 
@@ -239,7 +237,6 @@ esp_err_t Esp32UsbTransport::hid_set_report(uint8_t report_type, uint8_t report_
     std::unique_lock<std::mutex> lock(device_mutex_);
 
     if (device_gone_pending_.load()) {
-        process_device_gone_locked();
         return ESP_ERR_INVALID_STATE;
     }
     if (!device_.dev_hdl) {
@@ -329,11 +326,6 @@ esp_err_t Esp32UsbTransport::hid_set_report(uint8_t report_type, uint8_t report_
     vSemaphoreDelete(done_sem);
     usb_host_transfer_free(transfer);
 
-    lock.lock();
-    if (device_gone_pending_.load()) {
-        process_device_gone_locked();
-    }
-
     return ret;
 }
 
@@ -343,7 +335,6 @@ esp_err_t Esp32UsbTransport::get_string_descriptor(uint8_t string_index,
     std::unique_lock<std::mutex> lock(device_mutex_);
 
     if (device_gone_pending_.load()) {
-        process_device_gone_locked();
         set_last_error("USB device disconnected");
         return ESP_ERR_INVALID_STATE;
     }
@@ -469,11 +460,6 @@ esp_err_t Esp32UsbTransport::get_string_descriptor(uint8_t string_index,
     vSemaphoreDelete(done_sem);
     usb_host_transfer_free(transfer);
 
-    lock.lock();
-    if (device_gone_pending_.load()) {
-        process_device_gone_locked();
-    }
-
     return ret;
 }
 
@@ -482,7 +468,6 @@ esp_err_t Esp32UsbTransport::get_hid_report_descriptor(std::vector<uint8_t>& des
     std::unique_lock<std::mutex> lock(device_mutex_);
 
     if (device_gone_pending_.load()) {
-        process_device_gone_locked();
         set_last_error("USB device disconnected");
         return ESP_ERR_INVALID_STATE;
     }
@@ -638,11 +623,6 @@ esp_err_t Esp32UsbTransport::get_hid_report_descriptor(std::vector<uint8_t>& des
     vSemaphoreDelete(done_sem);
     usb_host_transfer_free(transfer);
 
-    lock.lock();
-    if (device_gone_pending_.load()) {
-        process_device_gone_locked();
-    }
-
     return ret;
 }
 
@@ -678,6 +658,12 @@ esp_err_t Esp32UsbTransport::setup_usb_host() {
         if (task_created != pdTRUE) {
             ESP_LOGE(ESP32_USB_TAG, "Failed to create USB client task");
             usb_tasks_running_ = false;
+            // The lib task is already running — wait for it to notice the flag
+            // and exit so the next initialize() can call usb_host_install().
+            for (int i = 0; i < 20 && !usb_lib_task_exited_.load(); i++) {
+                vTaskDelay(pdMS_TO_TICKS(50));
+            }
+            usb_lib_task_handle_ = nullptr;
             return ESP_FAIL;
         }
 
@@ -702,11 +688,33 @@ esp_err_t Esp32UsbTransport::teardown_usb_host() {
         usb_client_task_handle_ = nullptr;
     }
 
+    // The client task is gone, but there may be pending transfer callbacks
+    // (leaked transfers from semaphore timeouts during detection/read).
+    // Drain them now — usb_host_client_handle_events() delivers the callbacks
+    // and the USB host library won't let us release the interface or close the
+    // device until all in-flight URBs have been retired.
+    if (device_.client_hdl) {
+        for (int i = 0; i < 10; i++) {
+            esp_err_t ev_ret = usb_host_client_handle_events(device_.client_hdl, pdMS_TO_TICKS(50));
+            if (ev_ret == ESP_ERR_TIMEOUT) break;
+        }
+    }
+
     // Release interface and close device before deregistering the client so
     // that the lib task's NO_CLIENTS handler can free remaining devices.
     if (device_.dev_hdl) {
         ESP_LOGI(ESP32_USB_TAG, "Cleaning up device resources");
         usb_host_interface_release(device_.client_hdl, device_.dev_hdl, device_.interface_num);
+
+        // Drain again after interface release — canceling the interface's
+        // endpoints may produce additional completed/canceled URBs.
+        if (device_.client_hdl) {
+            for (int i = 0; i < 10; i++) {
+                esp_err_t ev_ret = usb_host_client_handle_events(device_.client_hdl, pdMS_TO_TICKS(50));
+                if (ev_ret == ESP_ERR_TIMEOUT) break;
+            }
+        }
+
         usb_host_device_close(device_.client_hdl, device_.dev_hdl);
         device_.dev_hdl = nullptr;
     }
@@ -726,6 +734,12 @@ esp_err_t Esp32UsbTransport::teardown_usb_host() {
         ESP_LOGW(ESP32_USB_TAG, "USB lib task did not exit in time");
     }
     usb_lib_task_handle_ = nullptr;
+
+    // The drain loops above may have delivered NEW_DEV / DEV_GONE events
+    // through the callback, re-setting these flags.  Clear them so a
+    // subsequent initialize() starts with a clean slate.
+    device_gone_pending_ = false;
+    new_device_pending_ = false;
 
     ESP_LOGI(ESP32_USB_TAG, "USB Host tasks stopped");
     return ESP_OK;
@@ -872,7 +886,6 @@ esp_err_t Esp32UsbTransport::submit_control_transfer(uint8_t bmRequestType, uint
     std::unique_lock<std::mutex> lock(device_mutex_);
 
     if (device_gone_pending_.load()) {
-        process_device_gone_locked();
         return ESP_ERR_INVALID_STATE;
     }
     if (!device_.dev_hdl) {
@@ -955,11 +968,6 @@ esp_err_t Esp32UsbTransport::submit_control_transfer(uint8_t bmRequestType, uint
     delete ctx;
     vSemaphoreDelete(done_sem);
     usb_host_transfer_free(transfer);
-
-    lock.lock();
-    if (device_gone_pending_.load()) {
-        process_device_gone_locked();
-    }
 
     return ret;
 }
@@ -1065,7 +1073,22 @@ void Esp32UsbTransport::process_device_gone_locked() {
     device_gone_pending_ = false;
 
     if (device_.dev_hdl && device_.client_hdl) {
+        // Drain pending transfer callbacks before releasing the interface.
+        // Leaked transfers (from semaphore timeouts) still have in-flight URBs;
+        // the USB host library will not release the interface cleanly until
+        // their callbacks have been delivered.
+        for (int i = 0; i < 10; i++) {
+            esp_err_t ev = usb_host_client_handle_events(device_.client_hdl, pdMS_TO_TICKS(50));
+            if (ev == ESP_ERR_TIMEOUT) break;
+        }
+
         usb_host_interface_release(device_.client_hdl, device_.dev_hdl, device_.interface_num);
+
+        for (int i = 0; i < 10; i++) {
+            esp_err_t ev = usb_host_client_handle_events(device_.client_hdl, pdMS_TO_TICKS(50));
+            if (ev == ESP_ERR_TIMEOUT) break;
+        }
+
         usb_host_device_close(device_.client_hdl, device_.dev_hdl);
         device_.dev_hdl = nullptr;
     } else if (device_.dev_hdl) {

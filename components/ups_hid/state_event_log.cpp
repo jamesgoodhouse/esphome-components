@@ -12,6 +12,9 @@ static const char *const NVS_NAMESPACE = "ups_evtlog";
 static const char *const NVS_KEY_COUNT = "count";
 
 void StateEventLog::record(const std::string &timestamp, const std::string &message) {
+  bool should_persist = message.find("Status:") != std::string::npos ||
+                        message.find("Initial state:") != std::string::npos ||
+                        message.find("Boot:") != std::string::npos;
   {
     std::lock_guard<std::mutex> lock(mutex_);
     if (buffer_.size() < MAX_EVENT_LOG_ENTRIES) {
@@ -23,11 +26,9 @@ void StateEventLog::record(const std::string &timestamp, const std::string &mess
     if (count_ < MAX_EVENT_LOG_ENTRIES) {
       count_++;
     }
-  }
-  if (message.find("Status:") != std::string::npos ||
-      message.find("Initial state:") != std::string::npos ||
-      message.find("Boot:") != std::string::npos) {
-    nvs_dirty_ = true;
+    if (should_persist) {
+      nvs_dirty_ = true;
+    }
   }
 }
 
@@ -111,6 +112,7 @@ void StateEventLog::load_from_nvs() {
     size_t ts_len = 0, msg_len = 0;
     if (nvs_get_str(handle, ts_key, nullptr, &ts_len) != ESP_OK) continue;
     if (nvs_get_str(handle, msg_key, nullptr, &msg_len) != ESP_OK) continue;
+    if (ts_len <= 1 || msg_len <= 1) continue;
 
     std::string ts(ts_len - 1, '\0');
     std::string msg(msg_len - 1, '\0');

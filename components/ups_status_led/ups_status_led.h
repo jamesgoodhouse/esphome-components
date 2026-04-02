@@ -128,11 +128,11 @@ class UpsStatusLedComponent : public Component {
     force_update_ = true;  // Flag for next loop update
   }
   
-  // Status getters
-  bool is_enabled() const { return enabled_; }
-  float get_brightness() const { return brightness_; }
-  bool is_night_mode_active() const { return is_night_time(); }
-  LedPattern get_current_pattern() const { return current_pattern_; }
+  // Status getters (thread-safe — may be called from HA/API thread)
+  bool is_enabled() const { std::lock_guard<std::mutex> lock(state_mutex_); return enabled_; }
+  float get_brightness() const { std::lock_guard<std::mutex> lock(state_mutex_); return brightness_; }
+  bool is_night_mode_active() const { std::lock_guard<std::mutex> lock(state_mutex_); return is_night_time(); }
+  LedPattern get_current_pattern() const { std::lock_guard<std::mutex> lock(state_mutex_); return current_pattern_; }
   
   // Home Assistant entity setters
 #ifdef USE_SWITCH
