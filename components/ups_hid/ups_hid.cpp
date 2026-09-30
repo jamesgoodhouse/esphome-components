@@ -11,7 +11,7 @@
 #include "protocol_tripplite.h"
 #include "protocol_generic.h"
 #include "esphome/core/log.h"
-#include "esphome/core/application.h"
+#include "esphome/core/hal.h"
 #include "esphome/components/time/real_time_clock.h"
 #include <functional>
 #include <cinttypes>
@@ -135,6 +135,14 @@ void UpsHidComponent::request_transport_recovery(const char *reason) {
   transport_->request_recovery(reason);
 }
 
+void UpsHidComponent::reboot(const char *why) {
+  ESP_LOGE(TAG, "%s, rebooting ESP", why);
+  event_log_.record(format_event_timestamp(), std::string("Reboot: ") + why);
+  event_log_.save_to_nvs();
+  delay(100);  // let the log lines flush
+  arch_restart();
+}
+
 // Runs on the main loop. Never touches the protocol or transport state
 // directly; it only asks the transport for a recovery or, as a last resort,
 // reboots.
@@ -148,10 +156,7 @@ void UpsHidComponent::check_task_health() {
   // stale heartbeat means it is blocked inside one (device not answering).
   if (hb != 0 && now - hb > TASK_HUNG_MS) {
     if (now - hb > TASK_HUNG_REBOOT_MS) {
-      ESP_LOGE(TAG, "USB read task hung for %" PRIu32 "s despite recovery attempts, rebooting ESP", (now - hb) / 1000);
-      delay(100);
-      App.safe_reboot();
-      return;
+      reboot("USB read task hung for 3 minutes despite recovery attempts");
     }
     if (now - last_recovery_request_ms_.load() > RECOVERY_MIN_INTERVAL_MS) {
       ESP_LOGE(TAG, "USB read task heartbeat stale (%" PRIu32 "s)", (now - hb) / 1000);
@@ -168,10 +173,7 @@ void UpsHidComponent::check_task_health() {
   if (last_ok != 0 && transport_ && transport_->is_connected() &&
       recovery_attempts_.load() >= MAX_RECOVERIES_BEFORE_REBOOT &&
       now - last_ok > REBOOT_AFTER_STALE_MS) {
-    ESP_LOGE(TAG, "No UPS data for %" PRIu32 "s after %" PRIu32 " USB recoveries, rebooting ESP",
-             (now - last_ok) / 1000, recovery_attempts_.load());
-    delay(100);
-    App.safe_reboot();
+    reboot("No UPS data for 5 minutes despite repeated USB recoveries");
   }
 }
 
@@ -349,7 +351,7 @@ void UpsHidComponent::usb_read_loop() {
         consecutive_failures_ = 0;
       } else {
         consecutive_failures_++;
-        ESP_LOGW(TAG, log_messages::DETECTION_FAILED, consecutive_failures_.load());
+        ESP_LOGW(TAG, log_messages::DETECTION_FAILED, static_cast<unsigned>(consecutive_failures_.load()));
 
         if (consecutive_failures_ % DETECTION_FAILURES_PER_RECOVERY == 0) {
           // A device that used to work has stopped answering: power-cycle the
@@ -382,7 +384,7 @@ void UpsHidComponent::usb_read_loop() {
       stale_data_cleared_ = false;
     } else {
       consecutive_failures_++;
-      ESP_LOGW(TAG, log_messages::READ_FAILED, consecutive_failures_.load());
+      ESP_LOGW(TAG, log_messages::READ_FAILED, static_cast<unsigned>(consecutive_failures_.load()));
       if (consecutive_failures_ > max_consecutive_failures_) {
         ESP_LOGW(TAG, log_messages::RESETTING_PROTOCOL);
         active_protocol_.reset();
@@ -1010,7 +1012,8 @@ std::string UpsHidComponent::format_event_timestamp() const {
   uint32_t m = (total_s % 3600) / 60;
   uint32_t s = total_s % 60;
   char buf[16];
-  snprintf(buf, sizeof(buf), "+%02u:%02u:%02u", h, m, s);
+  snprintf(buf, sizeof(buf), "+%02u:%02u:%02u", static_cast<unsigned>(h), static_cast<unsigned>(m),
+           static_cast<unsigned>(s));
   return std::string(buf);
 }
 
