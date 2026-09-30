@@ -6,12 +6,13 @@
 # (e.g., via regional configuration packages)
 
 # Physical LED configuration (hardware abstraction)
+# channel_colors requires ESPHome >= 2026.8 (replaces the deprecated rgb_order)
 light:
   - platform: esp32_rmt_led_strip
     chipset: WS2812
     pin: ${led_pin}
     num_leds: 1
-    rgb_order: GRB
+    channel_colors: GRB
     name: "UPS Status LED Hardware"
     id: ups_status_led_hw
     internal: true  # Hide from HA since controlled by ups_status_led
