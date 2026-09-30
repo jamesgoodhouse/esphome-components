@@ -1348,13 +1348,14 @@ std::vector<std::string> NutServerComponent::split_args(const std::string &args)
 
 // upsd semantics: DRIVER-NOT-CONNECTED until a UPS protocol has produced data,
 // DATA-STALE when the last successful read is older than the max age (or the
-// power state could not be determined).
+// power state could not be determined). Like upsd, the last values are still
+// served during a short USB recovery until they age out.
 DataState NutServerComponent::data_state(const ups_hid::UpsData *snapshot) const {
   if (!ups_hid_) return DataState::DRIVER_NOT_CONNECTED;
   if (!ups_hid_->has_ever_read_data()) return DataState::DRIVER_NOT_CONNECTED;
 
   uint32_t max_age_ms = std::max<uint32_t>(MIN_DATA_MAX_AGE_MS, 3 * ups_hid_->get_update_interval());
-  if (!ups_hid_->is_connected() || ups_hid_->get_data_age_ms() > max_age_ms) {
+  if (ups_hid_->get_data_age_ms() > max_age_ms) {
     return DataState::STALE;
   }
 

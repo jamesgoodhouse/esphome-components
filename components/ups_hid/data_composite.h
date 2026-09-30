@@ -91,7 +91,7 @@ struct UpsCompositeData {
     power.merge_from(other.power);
     if (other.device.is_valid()) device = other.device;
     if (other.test.is_valid()) test = other.test;
-    if (other.config.is_valid()) config = other.config;
+    config.merge_from(other.config);
   }
 
   // Clean reset without legacy flags

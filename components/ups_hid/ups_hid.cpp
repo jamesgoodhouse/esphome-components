@@ -160,9 +160,11 @@ void UpsHidComponent::check_task_health() {
 
   // The task is alive but data stopped flowing. The read loop escalates on
   // its own (protocol reset, detection retries, transport recovery); reboot
-  // only if that has been going on for a long time without success.
+  // only if that has been going on for a long time without success while a
+  // device is still attached.
   uint32_t last_ok = last_successful_read_.load();
-  if (last_ok != 0 && recovery_attempts_.load() >= MAX_RECOVERIES_BEFORE_REBOOT &&
+  if (last_ok != 0 && transport_ && transport_->is_connected() &&
+      recovery_attempts_.load() >= MAX_RECOVERIES_BEFORE_REBOOT &&
       now - last_ok > REBOOT_AFTER_STALE_MS) {
     ESP_LOGE(TAG, "No UPS data for %us after %u USB recoveries, rebooting ESP",
              (now - last_ok) / 1000, recovery_attempts_.load());
