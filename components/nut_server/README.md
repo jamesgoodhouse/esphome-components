@@ -109,7 +109,7 @@ Read-only commands (LIST, GET) do not require authentication per the NUT protoco
 
 ### Data availability (same semantics as `upsd`)
 
-`LIST VAR` and `GET VAR` answer `ERR DRIVER-NOT-CONNECTED` until the UPS has been detected and read at least once, and `ERR DATA-STALE` when the last successful read is older than `max(15 s, 3 × update_interval)` or the power state is unknown (for example while the USB link is being recovered). NUT clients such as `upsmon` and Synology DSM treat both exactly like a real NUT server going stale. Diagnostic variables (`ups.debug.*`) remain readable so the event log can be inspected while the UPS is unreachable.
+`LIST VAR` and `GET VAR` answer `ERR DRIVER-NOT-CONNECTED` until the UPS has been detected and read at least once, and `ERR DATA-STALE` when the last successful read is older than `max(15 s, 3 × update_interval)` (upsd's `MAXAGE`) or the power state is unknown. Like upsd, the last known values are still served during a short USB recovery until they age out. NUT clients such as `upsmon` and Synology DSM treat both errors exactly like a real NUT server going stale. Diagnostic variables (`ups.debug.*`) remain readable so the event log can be inspected while the UPS is unreachable.
 
 ### Control Commands
 
