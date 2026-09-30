@@ -172,7 +172,7 @@ automation:
 - Check start/end times don't conflict
 
 ### Colors Look Wrong
-- For RGB strips: Check `rgb_order` in light configuration
+- For RGB strips: Check `channel_colors` (ESPHome ≥ 2026.8; `rgb_order` on older releases) in the light configuration
 - For single-color LEDs: Only patterns work, not colors
 - Try switching between discrete/gradient modes
 
