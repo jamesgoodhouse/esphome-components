@@ -45,7 +45,6 @@ namespace limits {
 
 // ==================== Battery Constants ====================
 namespace battery {
-    static constexpr float LOW_THRESHOLD_PERCENT = 10.0f;
     static constexpr float MAX_LEVEL_PERCENT = 100.0f;
     static constexpr float VOLTAGE_SCALE_FACTOR = 10.0f;
     static constexpr float ALTERNATIVE_PERCENTAGE_SCALE = 200.0f;

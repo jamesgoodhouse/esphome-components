@@ -391,6 +391,12 @@ void UpsHidComponent::usb_read_loop() {
         { std::lock_guard<std::mutex> lock(data_mutex_); cached_protocol_name_ = protocol::NONE; }
         report_map_.reset();
         consecutive_failures_ = 0;
+        // Detection may keep succeeding on a device whose other reports have
+        // stopped answering, so escalate to a port power-cycle here too.
+        if ((has_ever_read_data() || recovery_attempts_.load() < MAX_RECOVERIES_BEFORE_REBOOT) &&
+            millis() - last_recovery_request_ms_.load() > RECOVERY_MIN_INTERVAL_MS) {
+          request_transport_recovery("repeated read failures");
+        }
       }
 
       if (!stale_data_cleared_ && has_ever_read_data() &&

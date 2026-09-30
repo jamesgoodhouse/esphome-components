@@ -42,9 +42,10 @@ struct UpsCompositeData {
   bool is_online() const { return power.status.compare(0, 6, "Online") == 0; }
   bool is_on_battery() const { return power.status.compare(0, 10, "On Battery") == 0; }
   bool has_power_status() const { return is_online() || is_on_battery(); }
-  bool is_discharging() const { return battery.status == "Discharging"; }
+  // Prefix matches: protocols append suffixes such as " - Replace Battery".
+  bool is_discharging() const { return battery.status.compare(0, 11, "Discharging") == 0; }
   bool is_charging() const {
-    if (battery.status == "Charging") return true;
+    if (battery.status.compare(0, 8, "Charging") == 0) return true;
     // Protocols that do not report charge flags: assume charging while online below 100%.
     return battery.status.empty() && is_online() && battery.is_valid() &&
            !std::isnan(battery.level) && battery.level < 100.0f;

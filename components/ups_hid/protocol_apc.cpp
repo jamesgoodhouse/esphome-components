@@ -513,12 +513,15 @@ void ApcReportParser::parse_present_status_report(const HidReport &report, UpsDa
     data.battery.status = battery_status::NORMAL;
   }
   
-  // Handle battery issues
-  if (below_capacity || shutdown_imminent) {
-    data.battery.charge_low = battery::LOW_THRESHOLD_PERCENT;  // Indicate low battery threshold
-    if (shutdown_imminent) {
-      data.battery.status += battery_status::SHUTDOWN_IMMINENT_SUFFIX;
-    }
+  // Device-reported flags (NUT: LB from BelowRemainingCapacityLimit/TimeLimitExpired/ShutdownImminent, RB, OVER)
+  data.power.ac_present = ac_present ? 1 : 0;
+  data.battery.flags_valid = true;
+  data.battery.low_battery = below_capacity || time_limit_expired;
+  data.battery.needs_replacement = need_replacement;
+  data.power.shutdown_imminent = shutdown_imminent;
+  data.power.overload = overload;
+  if (shutdown_imminent) {
+    data.battery.status += battery_status::SHUTDOWN_IMMINENT_SUFFIX;
   }
   
   if (need_replacement) {
@@ -689,6 +692,11 @@ void ApcReportParser::parse_status_report(const HidReport &report, UpsData &data
     data.battery.status = battery_status::NOT_CHARGING;
   }
   
+  data.power.ac_present = ac_present ? 1 : 0;
+  data.power.internal_failure = internal_failure;
+  data.battery.flags_valid = true;
+  data.battery.needs_replacement = need_replacement;
+
   // Check battery health
   if (!good || internal_failure || need_replacement) {
     if (need_replacement) {
@@ -704,6 +712,7 @@ void ApcReportParser::parse_status_report(const HidReport &report, UpsData &data
   if (report.data.size() >= 3) {
     uint8_t overload_byte = report.data[2];
     if (overload_byte > 0) {
+      data.power.overload = true;
       data.power.status += " - Overload";
     }
   }
@@ -711,7 +720,7 @@ void ApcReportParser::parse_status_report(const HidReport &report, UpsData &data
   if (report.data.size() >= 4) {
     uint8_t shutdown_byte = report.data[3];
     if (shutdown_byte > 0) {
-      data.battery.charge_low = battery::LOW_THRESHOLD_PERCENT;  // Indicate low battery threshold
+      data.power.shutdown_imminent = true;
     }
   }
   
