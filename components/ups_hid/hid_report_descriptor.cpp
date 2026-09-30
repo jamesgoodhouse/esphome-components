@@ -150,12 +150,6 @@ static uint16_t get_bit_offset(ParserState& state, uint8_t report_id, uint8_t re
   return initial;
 }
 
-/// Advance the bit offset for a (report_id, report_type) pair.
-static void advance_bit_offset(ParserState& state, uint8_t report_id, uint8_t report_type, uint16_t bits) {
-  uint16_t key = (static_cast<uint16_t>(report_id) << 8) | report_type;
-  state.bit_offsets[key] += bits;
-}
-
 // =============================================================================
 // HidReportMap::parse
 // =============================================================================
@@ -570,7 +564,8 @@ float HidReportMap::extract_raw_value(
 // Debug dump
 // =============================================================================
 
-static const char* report_type_name(uint8_t rt) {
+// Only referenced from debug-level logging, which may be compiled out.
+[[maybe_unused]] static const char* report_type_name(uint8_t rt) {
   switch (rt) {
     case HID_REPORT_TYPE_INPUT:   return "Input";
     case HID_REPORT_TYPE_OUTPUT:  return "Output";
@@ -579,7 +574,7 @@ static const char* report_type_name(uint8_t rt) {
   }
 }
 
-static const char* usage_page_name(uint16_t page) {
+[[maybe_unused]] static const char* usage_page_name(uint16_t page) {
   switch (page) {
     case 0x84: return "PowerDevice";
     case 0x85: return "BatterySystem";
