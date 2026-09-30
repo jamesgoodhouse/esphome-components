@@ -627,9 +627,9 @@ bool TrippLiteProtocol::read_data_descriptor(UpsData &data) {
                      rid, REPORT_FAIL_THRESHOLD,
                      report_sizes_.count(rid) ? report_sizes_[rid] : 0);
             for (const auto *f : map->get_fields_for_report(rid, HID_REPORT_TYPE_FEATURE)) {
-                uint16_t page = (f->usage >> 16) & 0xFFFF;
+                unsigned page = (f->usage >> 16) & 0xFFFF;
                 ESP_LOGW(TL_TAG, "  -> usage 0x%04X:0x%04X (%s), %u bits @ offset %u",
-                         page, f->usage & 0xFFFF,
+                         page, static_cast<unsigned>(f->usage & 0xFFFF),
                          page == 0x0084 ? "Power Device" :
                          page == 0x0085 ? "Battery System" :
                          page == 0xFFFF ? "Vendor-specific" : "other",
@@ -1274,7 +1274,7 @@ bool TrippLiteProtocol::read_data_heuristic(UpsData &data) {
             classified_rids.insert(rid);
             continue;
         }
-        if (!found_input_voltage && val >= 200 && val <= 260) {
+        if (!found_input_voltage && val >= 200) {  // uint8_t: 200-255 covers 230 V mains
             data.power.input_voltage = static_cast<float>(val);
             ESP_LOGI(TL_TAG, "Classified report 0x%02X = %d as input.voltage (EU)", rid, val);
             found_input_voltage = true;
@@ -1308,7 +1308,7 @@ bool TrippLiteProtocol::read_data_heuristic(UpsData &data) {
         }
 
         // Battery charge: 0-100 in 16-bit (more reliable than 1-byte small values)
-        if (!found_battery_charge && val16 >= 0 && val16 <= 100) {
+        if (!found_battery_charge && val16 <= 100) {
             data.battery.level = static_cast<float>(val16);
             ESP_LOGI(TL_TAG, "Classified report 0x%02X = %d as battery.charge", rid, val16);
             found_battery_charge = true;
@@ -1339,7 +1339,7 @@ bool TrippLiteProtocol::read_data_heuristic(UpsData &data) {
         }
 
         // Runtime in seconds: >100 and <86400 (remaining after charge, voltage, power)
-        if (!found_runtime && val16 > 100 && val16 < 86400) {
+        if (!found_runtime && val16 > 100) {
             data.battery.runtime_minutes = static_cast<float>(val16) / 60.0f;
             ESP_LOGI(TL_TAG, "Classified report 0x%02X = %d sec (%.1f min) as battery.runtime",
                      rid, val16, data.battery.runtime_minutes);
