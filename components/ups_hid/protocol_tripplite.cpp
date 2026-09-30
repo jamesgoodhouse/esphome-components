@@ -10,6 +10,7 @@
 #include <set>
 #include <map>
 #include <algorithm>
+#include <cinttypes>
 #include <cmath>
 
 namespace esphome {
@@ -141,7 +142,7 @@ bool TrippLiteProtocol::initialize() {
     }
 
     ESP_LOGI(TL_TAG, "Tripp Lite HID initialized (%s mode): %zu input reports, %zu feature reports"
-             " (%zu polled every cycle, rest every %us)",
+             " (%zu polled every cycle, rest every %" PRIu32 "s)",
              use_descriptor_ ? "descriptor" : "heuristic",
              available_input_reports_.size(), available_feature_reports_.size(),
              use_descriptor_ ? dynamic_reports_.size() : available_feature_reports_.size(),

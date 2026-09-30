@@ -3,6 +3,7 @@
 #include "esphome/core/log.h"
 #include "esphome/core/hal.h"
 #include "esp_idf_version.h"
+#include <cinttypes>
 #include <cstring>
 #include <cstdio>
 #include <cctype>
@@ -246,15 +247,15 @@ esp_err_t Esp32UsbTransport::control_transfer(uint8_t bmRequestType, uint8_t bRe
         waited_ms += timeout_ms;
         misses++;
         if (misses == 1) {
-            ESP_LOGW(ESP32_USB_TAG, "%s: no response after %ums", what, waited_ms);
+            ESP_LOGW(ESP32_USB_TAG, "%s: no response after %" PRIu32 "ms", what, waited_ms);
         } else if (misses == 2) {
             ctrl_stalls_++;
-            ESP_LOGE(ESP32_USB_TAG, "%s: no response after %ums (stall #%u), requesting USB port reset",
+            ESP_LOGE(ESP32_USB_TAG, "%s: no response after %" PRIu32 "ms (stall #%" PRIu32 "), requesting USB port reset",
                      what, waited_ms, ctrl_stalls_.load());
             request_recovery("control transfer stalled");
         } else if (waited_ms >= next_report_ms) {
             next_report_ms += 30000;
-            ESP_LOGE(ESP32_USB_TAG, "%s: still waiting for the USB stack to cancel the stalled transfer (%us)",
+            ESP_LOGE(ESP32_USB_TAG, "%s: still waiting for the USB stack to cancel the stalled transfer (%" PRIu32 "s)",
                      what, waited_ms / 1000);
             request_recovery("control transfer still stalled");
         }
@@ -849,7 +850,7 @@ void Esp32UsbTransport::process_port_reset() {
         port_resets_++;
         port_reset_started_ms_ = now;
         port_powered_off_ = true;
-        ESP_LOGW(ESP32_USB_TAG, "USB recovery #%u: root port powered off", port_resets_.load());
+        ESP_LOGW(ESP32_USB_TAG, "USB recovery #%" PRIu32 ": root port powered off", port_resets_.load());
         return;
     }
 
@@ -876,7 +877,7 @@ void Esp32UsbTransport::process_port_reset() {
         ESP_LOGI(ESP32_USB_TAG, "USB recovery: root port powered on, waiting for device re-enumeration");
     } else if (elapsed > PORT_RESET_MAX_MS) {
         port_powered_off_ = false;
-        ESP_LOGE(ESP32_USB_TAG, "USB recovery: could not re-power root port after %us: %s",
+        ESP_LOGE(ESP32_USB_TAG, "USB recovery: could not re-power root port after %" PRIu32 "s: %s",
                  elapsed / 1000, esp_err_to_name(ret));
     }
 #endif

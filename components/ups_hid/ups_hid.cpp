@@ -14,6 +14,7 @@
 #include "esphome/core/application.h"
 #include "esphome/components/time/real_time_clock.h"
 #include <functional>
+#include <cinttypes>
 #include <cmath>
 #include <algorithm>
 #ifdef USE_ESP32
@@ -68,8 +69,9 @@ void UpsHidComponent::setup() {
       nvs_get_u32(h, "uptime_s", &uptime_s);
       nvs_close(h);
 
-      ESP_LOGI(TAG, "Pre-crash diagnostics (from %us uptime): "
-               "usb_read stack=%u, heap free=%u, heap min=%u, usb stalls=%u, usb recoveries=%u",
+      ESP_LOGI(TAG, "Pre-crash diagnostics (from %" PRIu32 "s uptime): "
+               "usb_read stack=%" PRIu32 ", heap free=%" PRIu32 ", heap min=%" PRIu32
+               ", usb stalls=%" PRIu32 ", usb recoveries=%" PRIu32,
                uptime_s, stack_hwm, heap_free, heap_min, stalls, recoveries);
 
       std::string boot_msg = std::string("Boot: reset=") + reason +
@@ -128,7 +130,7 @@ void UpsHidComponent::request_transport_recovery(const char *reason) {
   if (!transport_) return;
   last_recovery_request_ms_.store(millis());
   recovery_attempts_++;
-  ESP_LOGW(TAG, "Requesting USB recovery #%u: %s", recovery_attempts_.load(), reason);
+  ESP_LOGW(TAG, "Requesting USB recovery #%" PRIu32 ": %s", recovery_attempts_.load(), reason);
   event_log_.record(format_event_timestamp(), std::string("USB recovery: ") + reason);
   transport_->request_recovery(reason);
 }
@@ -146,13 +148,13 @@ void UpsHidComponent::check_task_health() {
   // stale heartbeat means it is blocked inside one (device not answering).
   if (hb != 0 && now - hb > TASK_HUNG_MS) {
     if (now - hb > TASK_HUNG_REBOOT_MS) {
-      ESP_LOGE(TAG, "USB read task hung for %us despite recovery attempts, rebooting ESP", (now - hb) / 1000);
+      ESP_LOGE(TAG, "USB read task hung for %" PRIu32 "s despite recovery attempts, rebooting ESP", (now - hb) / 1000);
       delay(100);
       App.safe_reboot();
       return;
     }
     if (now - last_recovery_request_ms_.load() > RECOVERY_MIN_INTERVAL_MS) {
-      ESP_LOGE(TAG, "USB read task heartbeat stale (%us)", (now - hb) / 1000);
+      ESP_LOGE(TAG, "USB read task heartbeat stale (%" PRIu32 "s)", (now - hb) / 1000);
       request_transport_recovery("usb read task hung");
     }
     return;
@@ -166,7 +168,7 @@ void UpsHidComponent::check_task_health() {
   if (last_ok != 0 && transport_ && transport_->is_connected() &&
       recovery_attempts_.load() >= MAX_RECOVERIES_BEFORE_REBOOT &&
       now - last_ok > REBOOT_AFTER_STALE_MS) {
-    ESP_LOGE(TAG, "No UPS data for %us after %u USB recoveries, rebooting ESP",
+    ESP_LOGE(TAG, "No UPS data for %" PRIu32 "s after %" PRIu32 " USB recoveries, rebooting ESP",
              (now - last_ok) / 1000, recovery_attempts_.load());
     delay(100);
     App.safe_reboot();
@@ -198,7 +200,7 @@ void UpsHidComponent::write_diagnostics_to_nvs() {
   if (usb_read_task_handle_) {
     stack_hwm = uxTaskGetStackHighWaterMark(usb_read_task_handle_);
     if (stack_hwm < 512)
-      ESP_LOGW(TAG, "ups_usb_read stack low: %u bytes free", stack_hwm);
+      ESP_LOGW(TAG, "ups_usb_read stack low: %" PRIu32 " bytes free", stack_hwm);
   }
 
   uint32_t stalls = transport_ ? transport_->get_stall_count() : 0;
@@ -357,7 +359,7 @@ void UpsHidComponent::usb_read_loop() {
             request_transport_recovery("protocol detection failed");
             usb_task_sleep(2000);
           } else {
-            ESP_LOGW(TAG, "Device not recognised after %u recoveries; retrying detection every 60s",
+            ESP_LOGW(TAG, "Device not recognised after %" PRIu32 " recoveries; retrying detection every 60s",
                      recovery_attempts_.load());
             usb_task_sleep(60000);
           }
@@ -391,7 +393,7 @@ void UpsHidComponent::usb_read_loop() {
 
       if (!stale_data_cleared_ && has_ever_read_data() &&
           (millis() - last_successful_read_) > DATA_STALE_TIMEOUT_MS) {
-        ESP_LOGW(TAG, "No successful read for %us, clearing stale data",
+        ESP_LOGW(TAG, "No successful read for %" PRIu32 "s, clearing stale data",
                  DATA_STALE_TIMEOUT_MS / 1000);
         std::lock_guard<std::mutex> lock(data_mutex_);
         DeviceInfo saved_device = ups_data_.device;
@@ -417,9 +419,9 @@ void UpsHidComponent::dump_config() {
     ESP_LOGCONFIG(TAG, "  USB Product ID: 0x%04X", transport_->get_product_id());
   }
 
-  ESP_LOGCONFIG(TAG, "  Protocol Timeout: %u ms", protocol_timeout_ms_);
+  ESP_LOGCONFIG(TAG, "  Protocol Timeout: %" PRIu32 " ms", protocol_timeout_ms_);
   ESP_LOGCONFIG(TAG, "  Protocol Selection: %s", protocol_selection_.c_str());
-  ESP_LOGCONFIG(TAG, "  Update Interval: %u ms", get_update_interval());
+  ESP_LOGCONFIG(TAG, "  Update Interval: %" PRIu32 " ms", get_update_interval());
   ESP_LOGCONFIG(TAG, "  Time Source: %s", time_ != nullptr ? "configured" : "not configured (using uptime)");
 
   if (transport_ && transport_->is_connected()) {
@@ -949,7 +951,7 @@ bool UpsHidComponent::should_log_error(ErrorRateLimit& limiter) {
 
 void UpsHidComponent::log_suppressed_errors(ErrorRateLimit& limiter) {
   if (limiter.suppressed_count > 0) {
-    ESP_LOGW(TAG, "Suppressed %u similar errors in the last %u ms",
+    ESP_LOGW(TAG, "Suppressed %" PRIu32 " similar errors in the last %" PRIu32 " ms",
              limiter.suppressed_count, ErrorRateLimit::RATE_LIMIT_MS);
     limiter.suppressed_count = 0;
   }

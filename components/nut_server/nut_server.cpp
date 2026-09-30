@@ -4,6 +4,7 @@
 #include "esphome/core/util.h"
 #include "esphome/core/hal.h"
 #include <algorithm>
+#include <cinttypes>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -77,7 +78,7 @@ void NutServerComponent::dump_config() {
 bool NutServerComponent::start_server() {
 #ifdef USE_ESP32
   // Create server socket
-  server_socket_ = socket(AF_INET, SOCK_STREAM, 0);
+  server_socket_ = ::socket(AF_INET, SOCK_STREAM, 0);
   if (server_socket_ < 0) {
     ESP_LOGE(TAG, "Failed to create socket: %d", errno);
     return false;
@@ -85,21 +86,21 @@ bool NutServerComponent::start_server() {
 
   // Set socket options
   int yes = 1;
-  if (setsockopt(server_socket_, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes)) < 0) {
+  if (::setsockopt(server_socket_, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes)) < 0) {
     ESP_LOGW(TAG, "Failed to set SO_REUSEADDR: %d", errno);
   }
 
   // Set non-blocking mode
-  int flags = fcntl(server_socket_, F_GETFL, 0);
+  int flags = ::fcntl(server_socket_, F_GETFL, 0);
   if (flags < 0) {
     ESP_LOGE(TAG, "Failed to get socket flags: %d", errno);
-    close(server_socket_);
+    ::close(server_socket_);
     server_socket_ = -1;
     return false;
   }
-  if (fcntl(server_socket_, F_SETFL, flags | O_NONBLOCK) < 0) {
+  if (::fcntl(server_socket_, F_SETFL, flags | O_NONBLOCK) < 0) {
     ESP_LOGE(TAG, "Failed to set non-blocking mode: %d", errno);
-    close(server_socket_);
+    ::close(server_socket_);
     server_socket_ = -1;
     return false;
   }
@@ -111,17 +112,17 @@ bool NutServerComponent::start_server() {
   server_addr.sin_addr.s_addr = INADDR_ANY;
   server_addr.sin_port = htons(port_);
 
-  if (bind(server_socket_, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
+  if (::bind(server_socket_, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
     ESP_LOGE(TAG, "Failed to bind to port %d: %d", port_, errno);
-    close(server_socket_);
+    ::close(server_socket_);
     server_socket_ = -1;
     return false;
   }
 
   // Start listening
-  if (listen(server_socket_, max_clients_) < 0) {
+  if (::listen(server_socket_, max_clients_) < 0) {
     ESP_LOGE(TAG, "Failed to listen on socket: %d", errno);
-    close(server_socket_);
+    ::close(server_socket_);
     server_socket_ = -1;
     return false;
   }
@@ -155,7 +156,7 @@ void NutServerComponent::stop_server() {
 
   // Close server socket
   if (server_socket_ >= 0) {
-    close(server_socket_);
+    ::close(server_socket_);
     server_socket_ = -1;
   }
 
@@ -219,7 +220,7 @@ void NutServerComponent::accept_clients() {
     struct sockaddr_in client_addr;
     socklen_t client_len = sizeof(client_addr);
 
-    int client_socket = accept(server_socket_, (struct sockaddr *)&client_addr, &client_len);
+    int client_socket = ::accept(server_socket_, (struct sockaddr *)&client_addr, &client_len);
     if (client_socket < 0) {
       if (errno != EWOULDBLOCK && errno != EAGAIN) {
         ESP_LOGW(TAG, "Accept failed: %d", errno);
@@ -228,23 +229,23 @@ void NutServerComponent::accept_clients() {
     }
 
     // Set client socket to non-blocking
-    int flags = fcntl(client_socket, F_GETFL, 0);
-    if (flags < 0 || fcntl(client_socket, F_SETFL, flags | O_NONBLOCK) < 0) {
+    int flags = ::fcntl(client_socket, F_GETFL, 0);
+    if (flags < 0 || ::fcntl(client_socket, F_SETFL, flags | O_NONBLOCK) < 0) {
       ESP_LOGW(TAG, "Failed to set client socket non-blocking: %d", errno);
-      close(client_socket);
+      ::close(client_socket);
       continue;
     }
 
     // Enable TCP keepalive to detect dead connections faster
     int keepAlive = 1;
-    setsockopt(client_socket, SOL_SOCKET, SO_KEEPALIVE, &keepAlive, sizeof(keepAlive));
+    ::setsockopt(client_socket, SOL_SOCKET, SO_KEEPALIVE, &keepAlive, sizeof(keepAlive));
 #if defined(TCP_KEEPIDLE) && defined(TCP_KEEPINTVL) && defined(TCP_KEEPCNT)
     int keepIdle = 10;      // Start probes after 10 seconds idle
     int keepInterval = 5;   // Probe every 5 seconds
     int keepCount = 3;      // Disconnect after 3 failed probes
-    setsockopt(client_socket, IPPROTO_TCP, TCP_KEEPIDLE, &keepIdle, sizeof(keepIdle));
-    setsockopt(client_socket, IPPROTO_TCP, TCP_KEEPINTVL, &keepInterval, sizeof(keepInterval));
-    setsockopt(client_socket, IPPROTO_TCP, TCP_KEEPCNT, &keepCount, sizeof(keepCount));
+    ::setsockopt(client_socket, IPPROTO_TCP, TCP_KEEPIDLE, &keepIdle, sizeof(keepIdle));
+    ::setsockopt(client_socket, IPPROTO_TCP, TCP_KEEPINTVL, &keepInterval, sizeof(keepInterval));
+    ::setsockopt(client_socket, IPPROTO_TCP, TCP_KEEPCNT, &keepCount, sizeof(keepCount));
 #endif
 
     // Find available client slot
@@ -280,8 +281,8 @@ void NutServerComponent::accept_clients() {
       ESP_LOGW(TAG, "Maximum clients (%d/%d) reached, rejecting from %s. Active: [%s]",
                active, max_clients_, inet_ntoa(client_addr.sin_addr), active_ips.c_str());
       const char *msg = "ERR MAX-CLIENTS Maximum number of clients reached\n";
-      send(client_socket, msg, strlen(msg), 0);
-      close(client_socket);
+      ::send(client_socket, msg, strlen(msg), 0);
+      ::close(client_socket);
     }
   }
 #endif
@@ -290,7 +291,7 @@ void NutServerComponent::accept_clients() {
 void NutServerComponent::handle_client(NutClient &client) {
 #ifdef USE_ESP32
   char buffer[MAX_COMMAND_LENGTH];
-  int bytes_received = recv(client.socket_fd, buffer, sizeof(buffer), 0);
+  int bytes_received = ::recv(client.socket_fd, buffer, sizeof(buffer), 0);
 
   if (bytes_received > 0) {
     client.last_activity = millis();
@@ -332,7 +333,7 @@ void NutServerComponent::handle_client(NutClient &client) {
 void NutServerComponent::disconnect_client(NutClient &client) {
 #ifdef USE_ESP32
   if (client.socket_fd >= 0) {
-    close(client.socket_fd);
+    ::close(client.socket_fd);
   }
   client.reset();
 #endif
@@ -1015,7 +1016,7 @@ bool NutServerComponent::send_response(NutClient &client, const std::string &res
       return false;
     }
 
-    int bytes_sent = send(client.socket_fd, data + total_sent, remaining, 0);
+    int bytes_sent = ::send(client.socket_fd, data + total_sent, remaining, 0);
     if (bytes_sent < 0) {
       if (errno == EAGAIN || errno == EWOULDBLOCK) {
         vTaskDelay(pdMS_TO_TICKS(1));
@@ -1194,7 +1195,7 @@ std::string NutServerComponent::resolve_ups_var(const std::string &var_name,
     if (var_name == "ups.debug.read.status") {
       uint32_t age_ms = ups_hid_->get_data_age_ms();
       char buf[160];
-      snprintf(buf, sizeof(buf), "proto=%s stale=%u/%u age=%ums usb_stalls=%u usb_recoveries=%u",
+      snprintf(buf, sizeof(buf), "proto=%s stale=%u/%u age=%" PRIu32 "ms usb_stalls=%" PRIu32 " usb_recoveries=%" PRIu32,
                data.power.status.empty() ? "(empty)" : data.power.status.c_str(),
                data.power.status_stale_cycles,
                data.power.MAX_STALE_CYCLES,
