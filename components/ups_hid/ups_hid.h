@@ -210,6 +210,7 @@ namespace esphome
       static constexpr uint32_t REBOOT_AFTER_STALE_MS = 300000;
       void request_transport_recovery(const char *reason);
       void check_task_health();
+      [[noreturn]] void reboot(const char *why);
 
       // NVS writes (event log persistence, pre-crash diagnostics) run on their
       // own low-priority task so neither the main loop nor the USB task blocks

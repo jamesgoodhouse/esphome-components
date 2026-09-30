@@ -38,7 +38,8 @@ static const char *const ESP32_USB_TAG = "ups_hid.esp32_usb";
 static constexpr uint32_t PORT_RESET_OFF_MS = 1000;
 static constexpr uint32_t PORT_RESET_MAX_MS = 15000;
 
-static const char *transfer_status_name(usb_transfer_status_t s) {
+// Only referenced from debug-level logging, which may be compiled out.
+[[maybe_unused]] static const char *transfer_status_name(usb_transfer_status_t s) {
     switch (s) {
         case USB_TRANSFER_STATUS_COMPLETED: return "COMPLETED";
         case USB_TRANSFER_STATUS_ERROR:     return "ERROR";
