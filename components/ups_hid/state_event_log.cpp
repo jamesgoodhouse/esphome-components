@@ -14,7 +14,8 @@ static const char *const NVS_KEY_COUNT = "count";
 void StateEventLog::record(const std::string &timestamp, const std::string &message) {
   bool should_persist = message.find("Status:") != std::string::npos ||
                         message.find("Initial state:") != std::string::npos ||
-                        message.find("Boot:") != std::string::npos;
+                        message.find("Boot:") != std::string::npos ||
+                        message.find("USB recovery:") != std::string::npos;
   {
     std::lock_guard<std::mutex> lock(mutex_);
     if (buffer_.size() < MAX_EVENT_LOG_ENTRIES) {

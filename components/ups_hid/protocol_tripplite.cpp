@@ -3,6 +3,7 @@
 #include "constants_hid.h"
 #include "constants_ups.h"
 #include "esphome/core/log.h"
+#include "esphome/core/hal.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/portmacro.h"
@@ -108,6 +109,10 @@ bool TrippLiteProtocol::initialize() {
     available_input_reports_.clear();
     available_feature_reports_.clear();
     report_sizes_.clear();
+    report_fail_count_.clear();
+    dynamic_reports_.clear();
+    last_full_read_ms_ = 0;
+    force_full_read_ = true;
     device_info_read_ = false;
     use_descriptor_ = false;
     descriptor_needs_raw_extraction_ = false;
@@ -124,6 +129,7 @@ bool TrippLiteProtocol::initialize() {
         ESP_LOGI(TL_TAG, "HID report descriptor available (%zu fields) - using descriptor-based reading",
                  map->get_all_fields().size());
         enumerate_reports_from_descriptor();
+        classify_reports_from_descriptor();
     } else {
         ESP_LOGW(TL_TAG, "No HID report descriptor - falling back to heuristic discovery");
         enumerate_reports();
@@ -134,12 +140,16 @@ bool TrippLiteProtocol::initialize() {
         return false;
     }
 
-    ESP_LOGI(TL_TAG, "Tripp Lite HID initialized (%s mode): %zu input reports, %zu feature reports",
+    ESP_LOGI(TL_TAG, "Tripp Lite HID initialized (%s mode): %zu input reports, %zu feature reports"
+             " (%zu polled every cycle, rest every %us)",
              use_descriptor_ ? "descriptor" : "heuristic",
-             available_input_reports_.size(), available_feature_reports_.size());
+             available_input_reports_.size(), available_feature_reports_.size(),
+             use_descriptor_ ? dynamic_reports_.size() : available_feature_reports_.size(),
+             FULL_REFRESH_INTERVAL_MS / 1000);
 
     for (uint8_t id : available_feature_reports_) {
-        ESP_LOGD(TL_TAG, "  Feature report 0x%02X: %zu bytes", id, report_sizes_[id]);
+        ESP_LOGD(TL_TAG, "  Feature report 0x%02X: %zu bytes%s", id, report_sizes_[id],
+                 dynamic_reports_.count(id) ? " [every cycle]" : "");
     }
     for (uint8_t id : available_input_reports_) {
         ESP_LOGD(TL_TAG, "  Input report 0x%02X: %zu bytes", id, report_sizes_[id]);
@@ -167,6 +177,47 @@ void TrippLiteProtocol::enumerate_reports_from_descriptor() {
             if (report_sizes_.find(id) == report_sizes_.end()) {
                 report_sizes_[id] = inp_sz;
             }
+        }
+    }
+}
+
+// Usages whose values change at runtime (measurements, status flags, timers).
+// Reports without any of these hold identity/configuration data and are only
+// re-read on a full refresh, mirroring NUT's quick-poll vs full-update split.
+static bool is_dynamic_usage(uint32_t usage) {
+    uint16_t page = (usage >> 16) & 0xFFFF;
+    uint16_t id = usage & 0xFFFF;
+    if (page == HID_USAGE_PAGE_POWER_DEVICE) {
+        if (id >= HID_USAGE_POW_VOLTAGE && id <= HID_USAGE_POW_TEMPERATURE) return true;       // measurements
+        if (id >= HID_USAGE_POW_DELAY_BEFORE_REBOOT && id <= HID_USAGE_POW_TEST) return true;  // timers, test
+        if (id >= HID_USAGE_POW_PRESENT && id <= HID_USAGE_POW_COMMUNICATION_LOST) return true; // status bits
+        // Tripp Lite puts some Battery System status bits on this page
+        return id == HID_USAGE_TL_CHARGING || id == HID_USAGE_TL_DISCHARGING ||
+               id == HID_USAGE_TL_NEED_REPLACEMENT || id == HID_USAGE_TL_AC_PRESENT;
+    }
+    if (page == HID_USAGE_PAGE_BATTERY_SYSTEM) {
+        if (id >= HID_USAGE_BAT_BELOW_REMAINING_CAPACITY_LIMIT && id <= HID_USAGE_BAT_FULLY_DISCHARGED) return true;
+        return id == HID_USAGE_BAT_NEED_REPLACEMENT ||
+               id == HID_USAGE_BAT_REMAINING_CAPACITY ||
+               id == HID_USAGE_BAT_RUN_TIME_TO_EMPTY ||
+               id == HID_USAGE_BAT_AVERAGE_TIME_TO_EMPTY ||
+               id == HID_USAGE_BAT_AVERAGE_TIME_TO_FULL ||
+               id == HID_USAGE_BAT_AC_PRESENT ||
+               id == HID_USAGE_BAT_BATTERY_PRESENT;
+    }
+    return false;
+}
+
+void TrippLiteProtocol::classify_reports_from_descriptor() {
+    const HidReportMap* map = parent_->get_report_map();
+    if (!map) return;
+
+    dynamic_reports_.clear();
+    for (const auto& f : map->get_all_fields()) {
+        if (f.report_type != HID_REPORT_TYPE_FEATURE) continue;
+        if (!available_feature_reports_.count(f.report_id)) continue;
+        if (is_dynamic_usage(f.usage)) {
+            dynamic_reports_.insert(f.report_id);
         }
     }
 }
@@ -343,7 +394,11 @@ bool TrippLiteProtocol::read_hid_report(uint8_t report_id, HidReport &report) {
         }
     }
 
-    // Fallback to Input report
+    // Fallback to Input report (skip when the device just went away; a stalled
+    // transfer triggers a recovery and every further attempt would only wait)
+    if (!parent_->is_connected()) {
+        return false;
+    }
     if (available_input_reports_.empty() || available_input_reports_.count(report_id)) {
         buffer_len = sizeof(buffer);
         ret = parent_->hid_get_report(HID_REPORT_TYPE_INPUT, report_id,
@@ -381,30 +436,8 @@ bool TrippLiteProtocol::write_hid_feature_report(uint8_t report_id, const uint8_
 // Value Extraction Helpers
 // ============================================================================
 
-float TrippLiteProtocol::read_single_byte_value(const HidReport &report, uint8_t byte_index) {
-    if (report.data.size() > byte_index) {
-        return static_cast<float>(report.data[byte_index]);
-    }
-    return NAN;
-}
-
-uint16_t TrippLiteProtocol::read_16bit_le_value(const HidReport &report, uint8_t start_index) {
-    if (report.data.size() > static_cast<size_t>(start_index + 1)) {
-        return report.data[start_index] | (report.data[start_index + 1] << 8);
-    }
-    return 0xFFFF;
-}
-
 float TrippLiteProtocol::apply_battery_voltage_scale(float raw_value) {
     return static_cast<float>(battery_scale_ * raw_value);
-}
-
-float TrippLiteProtocol::apply_io_voltage_scale(float raw_value) {
-    return static_cast<float>(io_voltage_scale_ * raw_value);
-}
-
-float TrippLiteProtocol::apply_io_frequency_scale(float raw_value) {
-    return static_cast<float>(io_frequency_scale_ * raw_value);
 }
 
 
@@ -466,7 +499,7 @@ float TrippLiteProtocol::read_usage_value(
         val = map->extract_field_value(*field, it->second.data(), it->second.size());
     }
     if (!std::isnan(val)) {
-        ESP_LOGD(TL_TAG, "%s = %.2f (report 0x%02X, bits %u@%u, %s)",
+        ESP_LOGV(TL_TAG, "%s = %.2f (report 0x%02X, bits %u@%u, %s)",
                  name, val, field->report_id, field->bit_size, field->bit_offset,
                  descriptor_needs_raw_extraction_ ? "raw" : "converted");
     }
@@ -513,7 +546,7 @@ float TrippLiteProtocol::read_usage_in_collection(
         val = map->extract_field_value(*field, it->second.data(), it->second.size());
     }
     if (!std::isnan(val)) {
-        ESP_LOGD(TL_TAG, "%s = %.2f (report 0x%02X, collection 0x%08lX, %s)",
+        ESP_LOGV(TL_TAG, "%s = %.2f (report 0x%02X, collection 0x%08lX, %s)",
                  name, val, field->report_id, (unsigned long)collection_usage,
                  descriptor_needs_raw_extraction_ ? "raw" : "converted");
     }
@@ -536,72 +569,78 @@ bool TrippLiteProtocol::read_data_descriptor(UpsData &data) {
         return read_data_heuristic(data);
     }
 
-    ESP_LOGV(TL_TAG, "Reading Tripp Lite HID data (descriptor mode)...");
+    // Full refresh: every feature report. Quick cycle: only the reports that
+    // carry measurements/status; values not read this cycle stay NaN and the
+    // component keeps the previous ones.
+    uint32_t now = millis();
+    bool full = force_full_read_ || last_full_read_ms_ == 0 || dynamic_reports_.empty() ||
+                (now - last_full_read_ms_) >= FULL_REFRESH_INTERVAL_MS;
+    const std::set<uint8_t>& to_read = full ? available_feature_reports_ : dynamic_reports_;
 
-    // Step 1: Read ALL available feature reports into a cache.
-    // Each report is a separate USB HID GET_REPORT request.
-    // Individual reports can fail while others succeed.
-    // If many consecutive reports time out, abort early to avoid blocking for
-    // minutes when the device is unresponsive.
-    static constexpr int MAX_CONSECUTIVE_TIMEOUTS = 5;
+    ESP_LOGV(TL_TAG, "Reading Tripp Lite HID data (descriptor mode, %s, %zu reports)...",
+             full ? "full" : "quick", to_read.size());
+
+    // Each report is a separate GET_REPORT; individual reports may fail while
+    // others succeed. Abort the cycle after several consecutive failures so an
+    // unresponsive device does not hold the read task for long.
+    static constexpr int MAX_CONSECUTIVE_FAILURES = 5;
     std::map<uint8_t, std::vector<uint8_t>> report_cache;
     int reports_read = 0;
-    int reports_failed = 0;
-    int consecutive_timeouts = 0;
-    std::vector<uint8_t> to_exclude;
+    int consecutive_failures = 0;
+    bool aborted = false;
+    std::vector<uint8_t> failed;
 
-    for (uint8_t rid : available_feature_reports_) {
+    for (uint8_t rid : to_read) {
+        if (!available_feature_reports_.count(rid)) continue;
         HidReport report;
         if (read_hid_report(rid, report) && !report.data.empty()) {
             report_cache[rid] = std::move(report.data);
             reports_read++;
             report_fail_count_[rid] = 0;
-            consecutive_timeouts = 0;
+            consecutive_failures = 0;
         } else {
-            reports_failed++;
-            consecutive_timeouts++;
-            if (consecutive_timeouts >= MAX_CONSECUTIVE_TIMEOUTS) {
-                ESP_LOGW(TL_TAG, "Aborting read cycle: %d consecutive report failures "
-                         "(%d read, %d failed so far)",
-                         consecutive_timeouts, reports_read, reports_failed);
+            failed.push_back(rid);
+            if (++consecutive_failures >= MAX_CONSECUTIVE_FAILURES) {
+                ESP_LOGW(TL_TAG, "Aborting read cycle: %d consecutive report failures (%d read so far)",
+                         consecutive_failures, reports_read);
+                aborted = true;
                 break;
-            }
-            uint8_t &count = report_fail_count_[rid];
-            if (count < 255) count++;
-            if (count == REPORT_FAIL_THRESHOLD) {
-                ESP_LOGW(TL_TAG, "Report 0x%02X failed %u consecutive reads, excluding (%zu bytes expected)",
-                         rid, REPORT_FAIL_THRESHOLD,
-                         report_sizes_.count(rid) ? report_sizes_[rid] : 0);
-                auto fields = map->get_fields_for_report(rid, HID_REPORT_TYPE_FEATURE);
-                for (const auto *f : fields) {
-                    uint16_t page = (f->usage >> 16) & 0xFFFF;
-                    uint16_t id = f->usage & 0xFFFF;
-                    ESP_LOGW(TL_TAG, "  -> usage 0x%04X:0x%04X (%s), %u bits @ offset %u",
-                             page, id,
-                             page == 0x0084 ? "Power Device" :
-                             page == 0x0085 ? "Battery System" :
-                             page == 0xFFFF ? "Vendor-specific" : "other",
-                             f->bit_size, f->bit_offset);
-                }
-                to_exclude.push_back(rid);
             }
         }
     }
 
-    for (uint8_t rid : to_exclude) {
-        available_feature_reports_.erase(rid);
-    }
-
     if (reports_read == 0) {
-        ESP_LOGW(TL_TAG, "All %zu report reads failed", available_feature_reports_.size());
+        ESP_LOGW(TL_TAG, "All %zu report reads failed", failed.size());
         return false;
     }
 
-    if (reports_failed > 0) {
-        ESP_LOGD(TL_TAG, "Read %d/%zu reports (%d failed)",
-                 reports_read, available_feature_reports_.size() + reports_failed, reports_failed);
-    } else {
-        ESP_LOGD(TL_TAG, "Read all %d reports", reports_read);
+    // Exclude reports that keep failing while the rest of the device answers.
+    // A cycle that had to be aborted means the device stopped responding, not
+    // that those particular reports are bad, so it is not counted.
+    if (aborted) failed.clear();
+    for (uint8_t rid : failed) {
+        uint8_t &count = report_fail_count_[rid];
+        if (count < 255) count++;
+        if (count == REPORT_FAIL_THRESHOLD) {
+            ESP_LOGW(TL_TAG, "Report 0x%02X failed %u consecutive reads, excluding (%zu bytes expected)",
+                     rid, REPORT_FAIL_THRESHOLD,
+                     report_sizes_.count(rid) ? report_sizes_[rid] : 0);
+            for (const auto *f : map->get_fields_for_report(rid, HID_REPORT_TYPE_FEATURE)) {
+                uint16_t page = (f->usage >> 16) & 0xFFFF;
+                ESP_LOGW(TL_TAG, "  -> usage 0x%04X:0x%04X (%s), %u bits @ offset %u",
+                         page, f->usage & 0xFFFF,
+                         page == 0x0084 ? "Power Device" :
+                         page == 0x0085 ? "Battery System" :
+                         page == 0xFFFF ? "Vendor-specific" : "other",
+                         f->bit_size, f->bit_offset);
+            }
+            available_feature_reports_.erase(rid);
+            dynamic_reports_.erase(rid);
+        }
+    }
+
+    if (!failed.empty()) {
+        ESP_LOGD(TL_TAG, "Read %d/%zu reports (%zu failed)", reports_read, to_read.size(), failed.size());
     }
 
     // Step 2: Extract values using the parsed descriptor
@@ -726,19 +765,29 @@ bool TrippLiteProtocol::read_data_descriptor(UpsData &data) {
         ac_present = read_usage_value(map, report_cache,
             HID_USAGE_POW(HID_USAGE_TL_AC_PRESENT), "ups.status.ac_present.p84");
     }
+    if (!std::isnan(ac_present)) {
+        data.power.ac_present = ac_present > 0 ? 1 : 0;
+    }
 
     if (!std::isnan(discharging) && discharging > 0) {
         data.battery.status = battery_status::DISCHARGING;
-        data.power.status = status::ON_BATTERY;
     } else if (!std::isnan(fully_charged) && fully_charged > 0) {
         data.battery.status = battery_status::FULLY_CHARGED;
     } else if (!std::isnan(charging) && charging > 0) {
         data.battery.status = battery_status::CHARGING;
+    } else if (!std::isnan(charging) || !std::isnan(discharging)) {
+        data.battery.status = battery_status::NOT_CHARGING;
     }
 
     // Fully discharged flag
     float fully_discharged = read_usage_value(map, report_cache,
         HID_USAGE_BAT(HID_USAGE_BAT_FULLY_DISCHARGED), "battery.fully_discharged");
+
+    // Low battery as judged by the UPS itself (NUT: lowbatt_info -> "LB")
+    float below_limit = read_usage_value(map, report_cache,
+        HID_USAGE_BAT(HID_USAGE_BAT_BELOW_REMAINING_CAPACITY_LIMIT), "battery.below_capacity_limit");
+    float time_limit_expired = read_usage_value(map, report_cache,
+        HID_USAGE_BAT(HID_USAGE_BAT_REMAINING_TIME_LIMIT_EXPIRED), "battery.time_limit_expired");
 
     // Need replacement flag (standard on 0x85, TL also puts on 0x84)
     float need_replace = read_usage_value(map, report_cache,
@@ -747,8 +796,27 @@ bool TrippLiteProtocol::read_data_descriptor(UpsData &data) {
         need_replace = read_usage_value(map, report_cache,
             HID_USAGE_POW(HID_USAGE_TL_NEED_REPLACEMENT), "battery.need_replacement.p84");
     }
-    if (!std::isnan(need_replace) && need_replace > 0) {
-        data.battery.needs_replacement = true;
+
+    // The battery flags share the PresentStatus report; if any of them was read
+    // this cycle the others are authoritative too.
+    if (!std::isnan(charging) || !std::isnan(discharging) || !std::isnan(below_limit) ||
+        !std::isnan(need_replace)) {
+        data.battery.flags_valid = true;
+        data.battery.low_battery = (!std::isnan(below_limit) && below_limit > 0) ||
+                                   (!std::isnan(time_limit_expired) && time_limit_expired > 0);
+        data.battery.needs_replacement = !std::isnan(need_replace) && need_replace > 0;
+    }
+
+    // UPS-configured low battery thresholds (NUT battery.charge.low / battery.runtime.low)
+    float charge_low = read_usage_value(map, report_cache,
+        HID_USAGE_BAT(HID_USAGE_BAT_REMAINING_CAPACITY_LIMIT), "battery.charge.low");
+    if (!std::isnan(charge_low) && charge_low >= 0 && charge_low <= 100) {
+        data.battery.charge_low = charge_low;
+    }
+    float runtime_low_sec = read_usage_value(map, report_cache,
+        HID_USAGE_BAT(HID_USAGE_BAT_REMAINING_TIME_LIMIT), "battery.runtime.low");
+    if (!std::isnan(runtime_low_sec) && runtime_low_sec > 0) {
+        data.battery.runtime_low = runtime_low_sec / 60.0f;
     }
 
     // --- Input data ---
@@ -765,13 +833,10 @@ bool TrippLiteProtocol::read_data_descriptor(UpsData &data) {
             HID_USAGE_POW(HID_USAGE_POW_POWER_SUMMARY),
             "input.voltage.powersummary");
     }
-    // Apply descriptor-specific voltage scaling for devices with bad exponents
+    // Apply descriptor-specific voltage scaling for devices with bad exponents.
+    // 0 V while on battery is a real reading (NUT reports input.voltage: 0.0).
     if (descriptor_needs_raw_extraction_ && !std::isnan(data.power.input_voltage)) {
         data.power.input_voltage *= descriptor_voltage_scale_;
-    }
-    // Treat near-zero input voltage as absent (on battery, no grid)
-    if (!std::isnan(data.power.input_voltage) && data.power.input_voltage < 1.0f) {
-        data.power.input_voltage = NAN;
     }
 
     // Input frequency (in Input collection)
@@ -785,10 +850,6 @@ bool TrippLiteProtocol::read_data_descriptor(UpsData &data) {
     }
     if (descriptor_needs_raw_extraction_ && !std::isnan(data.power.frequency)) {
         data.power.frequency *= descriptor_frequency_scale_;
-    }
-    // Treat near-zero frequency as absent (on battery, no grid)
-    if (!std::isnan(data.power.frequency) && data.power.frequency < 1.0f) {
-        data.power.frequency = NAN;
     }
 
     // --- Output data ---
@@ -865,14 +926,9 @@ bool TrippLiteProtocol::read_data_descriptor(UpsData &data) {
     data.power.apparent_power_nominal = read_usage_value(map, report_cache,
         HID_USAGE_POW(HID_USAGE_POW_CONFIG_APPARENT_POWER), "ups.power.nominal");
 
-    // Active power nominal (W)
+    // Active power nominal (W); only reported when the device provides it
     data.power.realpower_nominal = read_usage_value(map, report_cache,
         HID_USAGE_POW(HID_USAGE_POW_CONFIG_ACTIVE_POWER), "ups.realpower.nominal");
-
-    // Estimate real power if only apparent is available
-    if (std::isnan(data.power.realpower_nominal) && !std::isnan(data.power.apparent_power_nominal)) {
-        data.power.realpower_nominal = data.power.apparent_power_nominal * 0.6f;
-    }
 
     // --- Transfer limits ---
     float low_transfer = read_usage_value(map, report_cache,
@@ -888,11 +944,6 @@ bool TrippLiteProtocol::read_data_descriptor(UpsData &data) {
     }
 
     // --- Status flags ---
-    // AC Present / Good / Overload / etc.
-    float present = read_usage_value(map, report_cache,
-        HID_USAGE_POW(HID_USAGE_POW_PRESENT), "ups.status.present");
-    float good = read_usage_value(map, report_cache,
-        HID_USAGE_POW(HID_USAGE_POW_GOOD), "ups.status.good");
     float overload = read_usage_value(map, report_cache,
         HID_USAGE_POW(HID_USAGE_POW_OVERLOAD), "ups.status.overload");
     float internal_failure = read_usage_value(map, report_cache,
@@ -903,8 +954,6 @@ bool TrippLiteProtocol::read_data_descriptor(UpsData &data) {
         HID_USAGE_POW(HID_USAGE_POW_SHUTDOWN_IMMINENT), "ups.status.shutdown_imminent");
     float awaiting_power = read_usage_value(map, report_cache,
         HID_USAGE_POW(HID_USAGE_POW_AWAITING_POWER), "ups.status.awaiting_power");
-
-    // AVR status flags
     float boost_val = read_usage_value(map, report_cache,
         HID_USAGE_POW(HID_USAGE_POW_BOOST), "ups.status.boost");
     float buck_val = read_usage_value(map, report_cache,
@@ -914,6 +963,8 @@ bool TrippLiteProtocol::read_data_descriptor(UpsData &data) {
     float commlost_val = read_usage_value(map, report_cache,
         HID_USAGE_POW(HID_USAGE_POW_COMMUNICATION_LOST), "ups.status.commlost");
 
+    data.power.overload = (!std::isnan(overload) && overload > 0);
+    data.power.internal_failure = (!std::isnan(internal_failure) && internal_failure > 0);
     data.power.boost_active = (!std::isnan(boost_val) && boost_val > 0);
     data.power.buck_active = (!std::isnan(buck_val) && buck_val > 0);
     data.power.over_temperature = (!std::isnan(overtemp_val) && overtemp_val > 0);
@@ -922,54 +973,26 @@ bool TrippLiteProtocol::read_data_descriptor(UpsData &data) {
     data.power.awaiting_power = (!std::isnan(awaiting_power) && awaiting_power > 0);
     data.power.voltage_out_of_range = (!std::isnan(voltage_oor) && voltage_oor > 0);
 
-    // Determine power status (input_voltage is already scaled/converted at this point).
-    // If none of the indicators yield a definitive answer, leave status empty
-    // so the merge layer keeps the previous known-good value.
-    if (data.power.status.empty()) {
-        if (!std::isnan(discharging) && discharging > 0) {
-            data.power.status = status::ON_BATTERY;
-        } else if (!std::isnan(ac_present) && ac_present > 0) {
-            data.power.status = status::ONLINE;
-        } else if (!std::isnan(data.power.input_voltage) && data.power.input_voltage > 10.0f) {
-            data.power.status = status::ONLINE;
-        } else if (!std::isnan(present) && present > 0) {
-            data.power.status = status::ONLINE;
-        } else if (!std::isnan(data.power.output_voltage) && data.power.output_voltage > 10.0f) {
-            data.power.status = status::ONLINE;
-        } else {
-            ESP_LOGW(TL_TAG,
-                "Status undetermined: discharging=%s, ac_present=%s, "
-                "input_v=%s, present=%s, output_v=%s",
-                std::isnan(discharging) ? "NaN" : (discharging > 0 ? "1" : "0"),
-                std::isnan(ac_present) ? "NaN" : (ac_present > 0 ? "1" : "0"),
-                std::isnan(data.power.input_voltage) ? "NaN" :
-                    std::to_string(data.power.input_voltage).c_str(),
-                std::isnan(present) ? "NaN" : (present > 0 ? "1" : "0"),
-                std::isnan(data.power.output_voltage) ? "NaN" :
-                    std::to_string(data.power.output_voltage).c_str());
-        }
+    // Power state, same rules as NUT's ups_status_set(): ACPresent decides
+    // online/on-battery; without it, Discharging means on battery. Fall back to
+    // the measured input voltage only when the device reports neither. Leave
+    // the status empty when undetermined so the previous value is kept.
+    if (data.power.ac_present == 1) {
+        data.power.status = status::ONLINE;
+    } else if (data.power.ac_present == 0) {
+        data.power.status = status::ON_BATTERY;
+    } else if (!std::isnan(discharging) && discharging > 0) {
+        data.power.status = status::ON_BATTERY;
+    } else if (data.power.input_voltage_valid()) {
+        data.power.status = status::ONLINE;
+    } else if (report_cache.size() == to_read.size()) {
+        ESP_LOGW(TL_TAG, "Status undetermined: no ACPresent/Discharging flag and input voltage %s",
+                 std::isnan(data.power.input_voltage) ? "unknown"
+                                                     : std::to_string(data.power.input_voltage).c_str());
     }
 
-    if (!std::isnan(overload) && overload > 0) {
-        data.power.status = "Overload";
-    }
-
-    // Append boost/buck to status for AVR UPS
-    if (data.power.boost_active && data.power.status == status::ONLINE) {
-        data.power.status = "Online (Boost)";
-    } else if (data.power.buck_active && data.power.status == status::ONLINE) {
-        data.power.status = "Online (Trim)";
-    }
-
-    // If fully discharged, note it in battery status
     if (!std::isnan(fully_discharged) && fully_discharged > 0) {
         data.battery.status = "Depleted";
-    }
-
-    // If we found input voltage but not output, assume output = input when online
-    if (!std::isnan(data.power.input_voltage) && std::isnan(data.power.output_voltage) &&
-        (data.power.status == status::ONLINE || data.power.status == "Online (Boost)" || data.power.status == "Online (Trim)")) {
-        data.power.output_voltage = data.power.input_voltage;
     }
 
     // --- Beeper status ---
@@ -1106,32 +1129,51 @@ bool TrippLiteProtocol::read_data_descriptor(UpsData &data) {
     // Determine success
     bool success = !std::isnan(data.power.input_voltage) ||
                    !std::isnan(data.battery.level) ||
-                   !std::isnan(data.power.load_percent);
+                   !std::isnan(data.power.load_percent) ||
+                   !data.power.status.empty();
 
-    if (success) {
-        char cur_buf[8] = "?";
-        if (!std::isnan(data.power.output_current)) {
-            snprintf(cur_buf, sizeof(cur_buf), "%.1f", data.power.output_current);
+    if (!success) {
+        if (full) {
+            ESP_LOGW(TL_TAG, "Descriptor-based reading produced no usable data, falling back to heuristic");
+            use_descriptor_ = false;
+            return read_data_heuristic(data);
         }
-        ESP_LOGI(TL_TAG, "Data read OK (descriptor): bat=%s%%, in=%sV, out=%sV, load=%s%%, freq=%sHz, cur=%sA, pwr=%sW",
-                 !std::isnan(data.battery.level) ? std::to_string(static_cast<int>(data.battery.level)).c_str() : "?",
-                 !std::isnan(data.power.input_voltage) ? std::to_string(static_cast<int>(data.power.input_voltage)).c_str() : "?",
-                 !std::isnan(data.power.output_voltage) ? std::to_string(static_cast<int>(data.power.output_voltage)).c_str() : "?",
-                 !std::isnan(data.power.load_percent) ? std::to_string(static_cast<int>(data.power.load_percent)).c_str() : "?",
-                 !std::isnan(data.power.frequency) ? std::to_string(static_cast<int>(data.power.frequency)).c_str() : "?",
-                 cur_buf,
-                 !std::isnan(data.power.active_power) ? std::to_string(static_cast<int>(data.power.active_power)).c_str() : "?");
-
-        // Log unused descriptor fields summary and their values
-        map->log_field_summary(TL_TAG, queried_usages_);
-        map->log_unused_field_values(TL_TAG, queried_usages_, report_cache);
-    } else {
-        ESP_LOGW(TL_TAG, "Descriptor-based reading produced no usable data, falling back to heuristic");
-        use_descriptor_ = false;
-        return read_data_heuristic(data);
+        ESP_LOGW(TL_TAG, "Quick read produced no usable data");
+        return false;
     }
 
-    return success;
+    auto fmt_val = [](float v, const char *fmt, char *buf, size_t n) -> const char * {
+        if (std::isnan(v)) return "?";
+        snprintf(buf, n, fmt, v);
+        return buf;
+    };
+    char b_bat[8], b_in[8], b_out[8], b_load[8], b_freq[8], b_cur[8], b_pwr[8];
+    char summary[160];
+    snprintf(summary, sizeof(summary),
+             "Data read OK (%s): %s, bat=%s%%, in=%sV, out=%sV, load=%s%%, freq=%sHz, cur=%sA, pwr=%sW",
+             full ? "full" : "quick",
+             data.power.status.empty() ? "status unchanged" : data.power.status.c_str(),
+             fmt_val(data.battery.level, "%.0f", b_bat, sizeof(b_bat)),
+             fmt_val(data.power.input_voltage, "%.0f", b_in, sizeof(b_in)),
+             fmt_val(data.power.output_voltage, "%.0f", b_out, sizeof(b_out)),
+             fmt_val(data.power.load_percent, "%.0f", b_load, sizeof(b_load)),
+             fmt_val(data.power.frequency, "%.0f", b_freq, sizeof(b_freq)),
+             fmt_val(data.power.output_current, "%.1f", b_cur, sizeof(b_cur)),
+             fmt_val(data.power.active_power, "%.0f", b_pwr, sizeof(b_pwr)));
+
+    if (full) {
+        ESP_LOGI(TL_TAG, "%s", summary);
+        // Descriptor coverage and the values of fields we do not use, for
+        // reverse-engineering vendor reports.
+        map->log_field_summary(TL_TAG, queried_usages_);
+        map->log_unused_field_values(TL_TAG, queried_usages_, report_cache);
+        last_full_read_ms_ = now;
+        force_full_read_ = false;
+    } else {
+        ESP_LOGD(TL_TAG, "%s", summary);
+    }
+
+    return true;
 }
 
 
@@ -1289,8 +1331,6 @@ bool TrippLiteProtocol::read_data_heuristic(UpsData &data) {
         // Nominal power (VA rating): typically 300-5000, matches model number
         if (!found_nominal_power && val16 >= 300 && val16 <= 10000) {
             data.power.apparent_power_nominal = static_cast<float>(val16);
-            // Estimate real power at ~60% of apparent power (typical for consumer UPS)
-            data.power.realpower_nominal = static_cast<float>(val16) * 0.6f;
             ESP_LOGI(TL_TAG, "Classified report 0x%02X = %d as ups.power.nominal (VA)", rid, val16);
             found_nominal_power = true;
             classified_rids.insert(rid);
@@ -1532,640 +1572,13 @@ void TrippLiteProtocol::read_device_information(UpsData &data) {
 
 
 // ============================================================================
-// Data Parsers
+// Timer Polling
 // ============================================================================
 
-void TrippLiteProtocol::parse_battery_data(UpsData &data) {
-    // Try to read battery-related reports
-    // NUT maps: battery.charge -> UPS.PowerSummary.RemainingCapacity
-    //           battery.runtime -> UPS.PowerSummary.RunTimeToEmpty
-    //           battery.voltage -> UPS.BatterySystem.Battery.Voltage
-    //           battery.voltage.nominal -> UPS.BatterySystem.Battery.ConfigVoltage
-
-    // Try multiple report IDs that commonly contain battery data
-    HidReport report;
-
-    // Try standard Power Summary reports for battery % and runtime
-    // These report IDs are commonly used but device-specific - try several
-    const uint8_t battery_report_ids[] = {
-        HID_USAGE_POW_POWER_SUMMARY,       // 0x24
-        0x0C,                               // Common power summary
-        0x08,                               // Battery runtime (CyberPower-style)
-        0x07,                               // Battery capacity
-    };
-
-    for (uint8_t rid : battery_report_ids) {
-        if (read_hid_report(rid, report) && report.data.size() >= 2) {
-            // Try to extract battery percentage
-            if (std::isnan(data.battery.level)) {
-                uint8_t battery_pct = report.data[1];
-                if (battery_pct <= 100) {
-                    data.battery.level = static_cast<float>(battery_pct);
-                    ESP_LOGD(TL_TAG, "Battery level: %d%% (report 0x%02X)", battery_pct, rid);
-                }
-            }
-
-            // Try to extract runtime (16-bit LE at bytes 2-3, in seconds)
-            if (std::isnan(data.battery.runtime_minutes) && report.data.size() >= 4) {
-                uint16_t runtime_raw = read_16bit_le_value(report, 2);
-                if (runtime_raw > 0 && runtime_raw < TIMER_INACTIVE) {
-                    // NUT reports runtime in seconds for Tripp Lite
-                    data.battery.runtime_minutes = static_cast<float>(runtime_raw) / 60.0f;
-                    ESP_LOGD(TL_TAG, "Battery runtime: %.1f min (%d sec, report 0x%02X)",
-                             data.battery.runtime_minutes, runtime_raw, rid);
-                }
-            }
-        }
-    }
-
-    // Try to read battery voltage
-    const uint8_t voltage_report_ids[] = {
-        HID_USAGE_POW_VOLTAGE,              // 0x30 (may be battery voltage in some contexts)
-        0x0A,                               // CyberPower-style battery voltage
-        0x40,                               // Battery system
-    };
-
-    for (uint8_t rid : voltage_report_ids) {
-        if (std::isnan(data.battery.voltage) && read_hid_report(rid, report) && report.data.size() >= 3) {
-            uint16_t voltage_raw = read_16bit_le_value(report, 1);
-            if (voltage_raw > 0 && voltage_raw < 0xFFFF) {
-                float voltage = apply_battery_voltage_scale(static_cast<float>(voltage_raw));
-                // Validate battery voltage (typical range 6V-60V for UPS batteries)
-                if (voltage >= 3.0f && voltage <= 60.0f) {
-                    data.battery.voltage = voltage;
-                    ESP_LOGD(TL_TAG, "Battery voltage: %.1fV (raw=%d, scale=%.4f, report 0x%02X)",
-                             voltage, voltage_raw, battery_scale_, rid);
-                    break;
-                }
-            }
-        }
-    }
-
-    // Try to read battery voltage nominal (ConfigVoltage)
-    const uint8_t nominal_voltage_report_ids[] = {
-        HID_USAGE_POW_CONFIG_VOLTAGE,       // 0x40
-        0x09,                               // CyberPower-style nominal
-    };
-
-    for (uint8_t rid : nominal_voltage_report_ids) {
-        if (std::isnan(data.battery.voltage_nominal) && read_hid_report(rid, report) && report.data.size() >= 3) {
-            uint16_t nominal_raw = read_16bit_le_value(report, 1);
-            if (nominal_raw > 0 && nominal_raw < 0xFFFF) {
-                // Nominal voltage typically doesn't need battery_scale_
-                // but may need it on some models
-                float nominal = static_cast<float>(nominal_raw);
-                // Try direct value first
-                if (nominal >= 6.0f && nominal <= 60.0f) {
-                    data.battery.voltage_nominal = nominal;
-                    ESP_LOGD(TL_TAG, "Battery voltage nominal: %.1fV (report 0x%02X)", nominal, rid);
-                    break;
-                }
-                // Try with battery scale
-                float scaled = apply_battery_voltage_scale(nominal);
-                if (scaled >= 6.0f && scaled <= 60.0f) {
-                    data.battery.voltage_nominal = scaled;
-                    ESP_LOGD(TL_TAG, "Battery voltage nominal: %.1fV (scaled, report 0x%02X)", scaled, rid);
-                    break;
-                }
-            }
-        }
-    }
-}
-
-void TrippLiteProtocol::parse_power_summary(UpsData &data) {
-    // NUT: UPS.PowerSummary contains RemainingCapacity, RunTimeToEmpty,
-    //      WarningCapacityLimit, RemainingCapacityLimit, and PresentStatus
-    // These are often in reports we've already tried in parse_battery_data()
-    // This method handles any remaining power summary data
-
-    // Check for WarningCapacityLimit and RemainingCapacityLimit
-    HidReport report;
-
-    // Try to find charge warning and low thresholds
-    const uint8_t threshold_report_ids[] = {0x07, 0x24};
-    for (uint8_t rid : threshold_report_ids) {
-        if (read_hid_report(rid, report) && report.data.size() >= 4) {
-            // Some reports contain: [id, remaining_capacity, warning_limit, ...]
-            // or [id, full_charge_capacity, remaining_capacity_limit, warning_capacity_limit]
-            if (report.data.size() >= 3) {
-                uint8_t val = report.data[2];
-                if (val > 0 && val <= 100 && std::isnan(data.battery.charge_low)) {
-                    data.battery.charge_low = static_cast<float>(val);
-                    ESP_LOGD(TL_TAG, "Battery charge low threshold: %d%% (report 0x%02X)", val, rid);
-                }
-            }
-            if (report.data.size() >= 4) {
-                uint8_t val = report.data[3];
-                if (val > 0 && val <= 100 && std::isnan(data.battery.charge_warning)) {
-                    data.battery.charge_warning = static_cast<float>(val);
-                    ESP_LOGD(TL_TAG, "Battery charge warning: %d%% (report 0x%02X)", val, rid);
-                }
-            }
-        }
-    }
-}
-
-void TrippLiteProtocol::parse_status_flags(UpsData &data) {
-    // NUT maps multiple PresentStatus boolean values from HID reports:
-    // ACPresent -> Online
-    // Charging -> Charging
-    // Discharging -> On Battery
-    // BelowRemainingCapacityLimit -> Low Battery
-    // etc.
-
-    HidReport report;
-
-    // Try various report IDs that commonly contain status flags
-    const uint8_t status_report_ids[] = {
-        HID_USAGE_POW_PRESENT_STATUS,       // 0x02
-        0x0B,                               // CyberPower-style present status
-        0x16,                               // Generic present status
-        0x01,                               // General status
-    };
-
-    for (uint8_t rid : status_report_ids) {
-        if (read_hid_report(rid, report) && report.data.size() >= 2) {
-            // Status flags are typically bit-packed
-            // The exact bit layout depends on the HID report descriptor
-            // Try to interpret common patterns
-
-            uint8_t status_byte = report.data[1];
-
-            // Skip invalid values
-            if (status_byte == 0xFF || status_byte == 0x00) continue;
-
-            // Log raw status for debugging
-            ESP_LOGD(TL_TAG, "Status report 0x%02X: 0x%02X", rid, status_byte);
-
-            // For 2-byte status, check second byte too
-            if (report.data.size() >= 3) {
-                uint8_t status_byte2 = report.data[2];
-                ESP_LOGD(TL_TAG, "  Second status byte: 0x%02X", status_byte2);
-
-                // Some Tripp Lite devices use multi-byte status flags
-                // Try interpreting as individual boolean fields
-                // NUT's HID parser extracts individual bits from specific offsets
-            }
-
-            // Common Tripp Lite status interpretations:
-            // Bit patterns vary by model, but these are common across many devices
-
-            // Check for AC Present (online) indication
-            if (status_byte & 0x01) {
-                data.power.status = status::ONLINE;
-                // Don't override existing input voltage if it's already set
-                if (std::isnan(data.power.input_voltage)) {
-                    data.power.input_voltage = parent_->get_fallback_nominal_voltage();
-                }
-            }
-
-            // Check for Discharging (on battery)
-            if (status_byte & 0x02) {
-                data.power.status = status::ON_BATTERY;
-                data.power.input_voltage = NAN;
-            }
-
-            // Check for Charging
-            if (status_byte & 0x04) {
-                if (data.battery.status.empty()) {
-                    data.battery.status = battery_status::CHARGING;
-                }
-            }
-
-            // Check for Low Battery
-            if (status_byte & 0x08) {
-                data.battery.charge_low = battery::LOW_THRESHOLD_PERCENT;
-                if (data.battery.status.empty()) {
-                    data.battery.status = battery_status::LOW;
-                }
-            }
-
-            // Check for Fully Charged
-            if (status_byte & 0x10) {
-                if (data.battery.status.empty() || data.battery.status == battery_status::CHARGING) {
-                    data.battery.status = battery_status::FULLY_CHARGED;
-                }
-            }
-
-            // Found valid status, break
-            if (!data.power.status.empty()) {
-                ESP_LOGD(TL_TAG, "Status: power=%s, battery=%s (report 0x%02X)",
-                         data.power.status.c_str(), data.battery.status.c_str(), rid);
-                break;
-            }
-        }
-    }
-}
-
-void TrippLiteProtocol::parse_input_data(UpsData &data) {
-    HidReport report;
-
-    // Input voltage
-    // NUT: input.voltage -> UPS.PowerSummary.Input.Voltage or UPS.PowerConverter.Input.Voltage
-    const uint8_t input_voltage_ids[] = {
-        HID_USAGE_POW_VOLTAGE,              // 0x30
-        0x0F,                               // CyberPower-style input voltage
-        HID_USAGE_POW_INPUT,                // 0x1A - Input collection
-    };
-
-    for (uint8_t rid : input_voltage_ids) {
-        if (read_hid_report(rid, report) && report.data.size() >= 3) {
-            uint16_t voltage_raw = read_16bit_le_value(report, 1);
-            if (voltage_raw > 0 && voltage_raw != 0xFFFF) {
-                float voltage = apply_io_voltage_scale(static_cast<float>(voltage_raw));
-
-                // Auto-detect if value needs additional scaling
-                if (voltage > 1000.0f) {
-                    voltage /= 10.0f;  // Tenths of volts
-                }
-
-                if (voltage >= voltage::MIN_VALID_VOLTAGE && voltage <= voltage::MAX_VALID_VOLTAGE) {
-                    data.power.input_voltage = voltage;
-                    ESP_LOGD(TL_TAG, "Input voltage: %.1fV (raw=%d, report 0x%02X)", voltage, voltage_raw, rid);
-                    break;
-                }
-            }
-        }
-    }
-
-    // Input voltage nominal
-    const uint8_t input_nominal_ids[] = {
-        HID_USAGE_POW_CONFIG_VOLTAGE,       // 0x40
-        0x0E,                               // CyberPower-style nominal
-    };
-
-    for (uint8_t rid : input_nominal_ids) {
-        if (std::isnan(data.power.input_voltage_nominal) && read_hid_report(rid, report) && report.data.size() >= 3) {
-            uint16_t nominal_raw = read_16bit_le_value(report, 1);
-            if (nominal_raw > 0 && nominal_raw != 0xFFFF) {
-                float nominal = apply_io_voltage_scale(static_cast<float>(nominal_raw));
-                if (nominal > 1000.0f) nominal /= 10.0f;
-
-                if (nominal >= voltage::MIN_VALID_VOLTAGE && nominal <= voltage::MAX_VALID_VOLTAGE) {
-                    data.power.input_voltage_nominal = nominal;
-                    ESP_LOGD(TL_TAG, "Input voltage nominal: %.0fV (report 0x%02X)", nominal, rid);
-                    break;
-                }
-            }
-        }
-    }
-}
-
-void TrippLiteProtocol::parse_output_data(UpsData &data) {
-    HidReport report;
-
-    // Output voltage
-    // NUT: output.voltage -> UPS.PowerConverter.Output.Voltage or UPS.PowerSummary.Voltage
-    const uint8_t output_voltage_ids[] = {
-        HID_USAGE_POW_CURRENT,              // 0x31 (often output voltage on some devices)
-        0x12,                               // CyberPower-style output voltage
-        HID_USAGE_POW_OUTPUT,               // 0x1C - Output collection
-    };
-
-    for (uint8_t rid : output_voltage_ids) {
-        if (read_hid_report(rid, report) && report.data.size() >= 3) {
-            uint16_t voltage_raw = read_16bit_le_value(report, 1);
-            if (voltage_raw > 0 && voltage_raw != 0xFFFF) {
-                float voltage = apply_io_voltage_scale(static_cast<float>(voltage_raw));
-                if (voltage > 1000.0f) voltage /= 10.0f;
-
-                if (voltage >= voltage::MIN_VALID_VOLTAGE && voltage <= voltage::MAX_VALID_VOLTAGE) {
-                    data.power.output_voltage = voltage;
-                    ESP_LOGD(TL_TAG, "Output voltage: %.1fV (raw=%d, report 0x%02X)", voltage, voltage_raw, rid);
-                    break;
-                }
-            }
-        }
-    }
-
-    // Output voltage nominal
-    // NUT: output.voltage.nominal -> UPS.Flow.ConfigVoltage
-    const uint8_t output_nominal_ids[] = {
-        HID_USAGE_POW_CONFIG_VOLTAGE,       // 0x40 (also used for input nominal, context-dependent)
-    };
-
-    for (uint8_t rid : output_nominal_ids) {
-        if (std::isnan(data.power.output_voltage_nominal) && read_hid_report(rid, report) && report.data.size() >= 3) {
-            uint16_t nominal_raw = read_16bit_le_value(report, 1);
-            if (nominal_raw > 0 && nominal_raw != 0xFFFF) {
-                float nominal = apply_io_voltage_scale(static_cast<float>(nominal_raw));
-                if (nominal > 1000.0f) nominal /= 10.0f;
-
-                if (nominal >= voltage::MIN_VALID_VOLTAGE && nominal <= voltage::MAX_VALID_VOLTAGE) {
-                    // If input nominal is already set to the same value, this is likely
-                    // the output nominal from a different context
-                    if (std::isnan(data.power.input_voltage_nominal) ||
-                        data.power.input_voltage_nominal == nominal) {
-                        data.power.output_voltage_nominal = nominal;
-                        // Also set input nominal if not already set
-                        if (std::isnan(data.power.input_voltage_nominal)) {
-                            data.power.input_voltage_nominal = nominal;
-                        }
-                        ESP_LOGD(TL_TAG, "Output voltage nominal: %.0fV (report 0x%02X)", nominal, rid);
-                    }
-                    break;
-                }
-            }
-        }
-    }
-}
-
-void TrippLiteProtocol::parse_load_data(UpsData &data) {
-    HidReport report;
-
-    // UPS load percentage
-    // NUT: ups.load -> UPS.OutletSystem.Outlet.PercentLoad
-    const uint8_t load_report_ids[] = {
-        HID_USAGE_POW_PERCENT_LOAD,         // 0x35
-        0x13,                               // CyberPower-style load
-        HID_USAGE_POW_CONFIG_PERCENT_LOAD,  // 0x45
-        0x50,                               // Common load report
-    };
-
-    for (uint8_t rid : load_report_ids) {
-        if (read_hid_report(rid, report) && report.data.size() >= 2) {
-            uint8_t load_raw = report.data[1];
-
-            // Skip invalid values
-            if (load_raw == 0xFF) continue;
-
-            if (load_raw <= 100) {
-                data.power.load_percent = static_cast<float>(load_raw);
-                ESP_LOGD(TL_TAG, "Load: %d%% (report 0x%02X)", load_raw, rid);
-                break;
-            }
-
-            // Try 16-bit value
-            if (report.data.size() >= 3) {
-                uint16_t load_16 = read_16bit_le_value(report, 1);
-                if (load_16 <= 100) {
-                    data.power.load_percent = static_cast<float>(load_16);
-                    ESP_LOGD(TL_TAG, "Load: %d%% (16-bit, report 0x%02X)", load_16, rid);
-                    break;
-                }
-            }
-        }
-    }
-}
-
-void TrippLiteProtocol::parse_frequency_data(UpsData &data) {
-    HidReport report;
-
-    // Input frequency
-    // NUT: input.frequency -> UPS.PowerConverter.Input.Frequency
-    const uint8_t freq_report_ids[] = {
-        HID_USAGE_POW_FREQUENCY,            // 0x32
-        HID_USAGE_POW_CONFIG_FREQUENCY,     // 0x42 (nominal frequency)
-    };
-
-    for (uint8_t rid : freq_report_ids) {
-        if (read_hid_report(rid, report) && report.data.size() >= 2) {
-            // Try single byte first
-            float freq = read_single_byte_value(report, 1);
-            freq = apply_io_frequency_scale(freq);
-
-            if (freq >= FREQUENCY_MIN_VALID && freq <= FREQUENCY_MAX_VALID) {
-                data.power.frequency = freq;
-                ESP_LOGD(TL_TAG, "Frequency: %.1f Hz (report 0x%02X)", freq, rid);
-                return;
-            }
-
-            // Try 16-bit value
-            if (report.data.size() >= 3) {
-                uint16_t freq_raw = read_16bit_le_value(report, 1);
-                float freq16 = apply_io_frequency_scale(static_cast<float>(freq_raw));
-
-                if (freq16 >= FREQUENCY_MIN_VALID && freq16 <= FREQUENCY_MAX_VALID) {
-                    data.power.frequency = freq16;
-                    ESP_LOGD(TL_TAG, "Frequency: %.1f Hz (16-bit, report 0x%02X)", freq16, rid);
-                    return;
-                }
-
-                // Try dividing by 10 (tenths of Hz)
-                float freq_tenths = static_cast<float>(freq_raw) / 10.0f;
-                freq_tenths = apply_io_frequency_scale(freq_tenths);
-                if (freq_tenths >= FREQUENCY_MIN_VALID && freq_tenths <= FREQUENCY_MAX_VALID) {
-                    data.power.frequency = freq_tenths;
-                    ESP_LOGD(TL_TAG, "Frequency: %.1f Hz (tenths, report 0x%02X)", freq_tenths, rid);
-                    return;
-                }
-            }
-        }
-    }
-}
-
-void TrippLiteProtocol::parse_transfer_limits(UpsData &data) {
-    HidReport report;
-
-    // Low voltage transfer
-    // NUT: input.transfer.low -> UPS.PowerConverter.Output.LowVoltageTransfer
-    if (read_hid_report(HID_USAGE_POW_LOW_VOLTAGE_TRANSFER, report) && report.data.size() >= 3) {
-        uint16_t low_raw = read_16bit_le_value(report, 1);
-        if (low_raw > 0 && low_raw != 0xFFFF) {
-            float low_voltage = apply_io_voltage_scale(static_cast<float>(low_raw));
-            if (low_voltage > 1000.0f) low_voltage /= 10.0f;
-            if (low_voltage >= 50.0f && low_voltage <= 200.0f) {
-                data.power.input_transfer_low = low_voltage;
-                ESP_LOGD(TL_TAG, "Transfer low: %.1fV", low_voltage);
-            }
-        }
-    }
-
-    // High voltage transfer
-    // NUT: input.transfer.high -> UPS.PowerConverter.Output.HighVoltageTransfer
-    if (read_hid_report(HID_USAGE_POW_HIGH_VOLTAGE_TRANSFER, report) && report.data.size() >= 3) {
-        uint16_t high_raw = read_16bit_le_value(report, 1);
-        if (high_raw > 0 && high_raw != 0xFFFF) {
-            float high_voltage = apply_io_voltage_scale(static_cast<float>(high_raw));
-            if (high_voltage > 1000.0f) high_voltage /= 10.0f;
-            if (high_voltage >= 100.0f && high_voltage <= 300.0f) {
-                data.power.input_transfer_high = high_voltage;
-                ESP_LOGD(TL_TAG, "Transfer high: %.1fV", high_voltage);
-            }
-        }
-    }
-}
-
-void TrippLiteProtocol::parse_power_nominal(UpsData &data) {
-    HidReport report;
-
-    // Apparent power nominal (VA rating)
-    // NUT: ups.power.nominal -> UPS.Flow.ConfigApparentPower
-    if (read_hid_report(HID_USAGE_POW_CONFIG_APPARENT_POWER, report) && report.data.size() >= 3) {
-        uint16_t power_raw = read_16bit_le_value(report, 1);
-        if (power_raw > 0 && power_raw != 0xFFFF && power_raw <= 20000) {
-            data.power.apparent_power_nominal = static_cast<float>(power_raw);
-            ESP_LOGD(TL_TAG, "Apparent power nominal: %.0f VA", data.power.apparent_power_nominal);
-        }
-    }
-
-    // Active power nominal (W rating)
-    // NUT: ups.realpower.nominal -> UPS.Flow.ConfigActivePower
-    if (read_hid_report(HID_USAGE_POW_CONFIG_ACTIVE_POWER, report) && report.data.size() >= 3) {
-        uint16_t power_raw = read_16bit_le_value(report, 1);
-        if (power_raw > 0 && power_raw != 0xFFFF && power_raw <= 20000) {
-            data.power.realpower_nominal = static_cast<float>(power_raw);
-            ESP_LOGD(TL_TAG, "Real power nominal: %.0f W", data.power.realpower_nominal);
-        }
-    }
-}
-
-void TrippLiteProtocol::parse_beeper_status(UpsData &data) {
-    HidReport report;
-
-    // Beeper status
-    // NUT: ups.beeper.status -> UPS.PowerSummary.AudibleAlarmControl
-    // Tripp Lite values: 1=disabled, 2=enabled, 3=muted
-    if (read_hid_report(HID_USAGE_POW_AUDIBLE_ALARM_CONTROL, report) && report.data.size() >= 2) {
-        uint8_t beeper_val = report.data[1];
-
-        switch (beeper_val) {
-            case 1:
-                data.config.beeper_status = "disabled";
-                data.config.beeper_state = ConfigData::BEEPER_DISABLED;
-                break;
-            case 2:
-                data.config.beeper_status = "enabled";
-                data.config.beeper_state = ConfigData::BEEPER_ENABLED;
-                break;
-            case 3:
-                data.config.beeper_status = "muted";
-                data.config.beeper_state = ConfigData::BEEPER_MUTED;
-                break;
-            default:
-                ESP_LOGD(TL_TAG, "Unknown beeper value: %d", beeper_val);
-                break;
-        }
-
-        if (!data.config.beeper_status.empty()) {
-            ESP_LOGD(TL_TAG, "Beeper status: %s (raw=%d)", data.config.beeper_status.c_str(), beeper_val);
-        }
-    }
-}
-
-void TrippLiteProtocol::parse_delay_configuration(UpsData &data) {
-    HidReport report;
-
-    // Shutdown delay
-    // NUT: ups.delay.shutdown -> UPS.OutletSystem.Outlet.DelayBeforeShutdown
-    if (read_hid_report(HID_USAGE_POW_DELAY_BEFORE_SHUTDOWN, report) && report.data.size() >= 3) {
-        uint16_t delay_raw = read_16bit_le_value(report, 1);
-        if (delay_raw != 0xFFFF && delay_raw < 7200) {
-            data.config.delay_shutdown = static_cast<int16_t>(delay_raw);
-            ESP_LOGD(TL_TAG, "Shutdown delay: %d sec", data.config.delay_shutdown);
-        }
-    }
-
-    // Startup delay
-    // NUT: ups.delay.start -> UPS.OutletSystem.Outlet.DelayBeforeStartup
-    if (read_hid_report(HID_USAGE_POW_DELAY_BEFORE_STARTUP, report) && report.data.size() >= 3) {
-        uint16_t delay_raw = read_16bit_le_value(report, 1);
-        if (delay_raw != 0xFFFF && delay_raw < 7200) {
-            data.config.delay_start = static_cast<int16_t>(delay_raw);
-            ESP_LOGD(TL_TAG, "Startup delay: %d sec", data.config.delay_start);
-        }
-    }
-
-    // Reboot delay
-    if (read_hid_report(HID_USAGE_POW_DELAY_BEFORE_REBOOT, report) && report.data.size() >= 3) {
-        uint16_t delay_raw = read_16bit_le_value(report, 1);
-        if (delay_raw != 0xFFFF && delay_raw < 7200) {
-            data.config.delay_reboot = static_cast<int16_t>(delay_raw);
-            ESP_LOGD(TL_TAG, "Reboot delay: %d sec", data.config.delay_reboot);
-        }
-    }
-}
-
-void TrippLiteProtocol::parse_timer_data(UpsData &data) {
-    HidReport report;
-
-    // Timer values: 65535 (0xFFFF) means "inactive" on Tripp Lite
-    // NUT: ups.timer.shutdown, ups.timer.reboot, ups.timer.start
-
-    // Shutdown timer
-    if (read_hid_report(HID_USAGE_POW_DELAY_BEFORE_SHUTDOWN, report) && report.data.size() >= 3) {
-        uint16_t timer_raw = read_16bit_le_value(report, 1);
-        if (timer_raw == TIMER_INACTIVE) {
-            data.test.timer_shutdown = -1;  // Inactive
-        } else {
-            data.test.timer_shutdown = static_cast<int16_t>(timer_raw);
-        }
-    }
-
-    // Reboot timer
-    if (read_hid_report(HID_USAGE_POW_DELAY_BEFORE_REBOOT, report) && report.data.size() >= 3) {
-        uint16_t timer_raw = read_16bit_le_value(report, 1);
-        if (timer_raw == TIMER_INACTIVE) {
-            data.test.timer_reboot = -1;  // Inactive
-        } else {
-            data.test.timer_reboot = static_cast<int16_t>(timer_raw);
-        }
-    }
-
-    // Start timer
-    if (read_hid_report(HID_USAGE_POW_DELAY_BEFORE_STARTUP, report) && report.data.size() >= 3) {
-        uint16_t timer_raw = read_16bit_le_value(report, 1);
-        if (timer_raw == TIMER_INACTIVE) {
-            data.test.timer_start = -1;  // Inactive
-        } else {
-            data.test.timer_start = static_cast<int16_t>(timer_raw);
-        }
-    }
-}
-
-void TrippLiteProtocol::parse_test_result(UpsData &data) {
-    HidReport report;
-
-    // Test result
-    // NUT: ups.test.result -> UPS.BatterySystem.Test
-    if (read_hid_report(HID_USAGE_POW_TEST, report) && report.data.size() >= 2) {
-        uint8_t test_val = report.data[1];
-
-        // NUT test_read_info mapping:
-        // 1 = Done and passed
-        // 2 = Done and warning
-        // 3 = Done and error
-        // 4 = Aborted
-        // 5 = In progress
-        // 6 = No test initiated
-        switch (test_val) {
-            case 1:
-                data.test.ups_test_result = test::RESULT_DONE_PASSED;
-                break;
-            case 2:
-                data.test.ups_test_result = test::RESULT_DONE_WARNING;
-                break;
-            case 3:
-                data.test.ups_test_result = test::RESULT_DONE_ERROR;
-                break;
-            case 4:
-                data.test.ups_test_result = test::RESULT_ABORTED;
-                break;
-            case 5:
-                data.test.ups_test_result = test::RESULT_IN_PROGRESS;
-                break;
-            case 6:
-                data.test.ups_test_result = test::RESULT_NO_TEST;
-                break;
-            default:
-                ESP_LOGD(TL_TAG, "Unknown test result value: %d", test_val);
-                break;
-        }
-
-        if (!data.test.ups_test_result.empty()) {
-            ESP_LOGD(TL_TAG, "Test result: %s (raw=%d)", data.test.ups_test_result.c_str(), test_val);
-        }
-    }
-}
-
-
-// ============================================================================
-// Timer Polling (for real-time countdown updates)
-// ============================================================================
-
+// Timers are read as part of the regular cycle (descriptor mode), so there is
+// nothing extra to poll here; the component derives fast polling from the data.
 bool TrippLiteProtocol::read_timer_data(UpsData &data) {
-    parse_timer_data(data);
-    return true;
+    return false;
 }
 
 

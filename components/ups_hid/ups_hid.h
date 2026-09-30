@@ -154,12 +154,17 @@ namespace esphome
       // State event log -- survives reboots via NVS, queryable via NUT
       const StateEventLog &get_event_log() const { return event_log_; }
       StateEventLog &get_event_log_mut() { return event_log_; }
+      void record_event(const std::string &message) { event_log_.record(format_event_timestamp(), message); }
 
       // Last reset reason (queryable via NUT as ups.debug.reset.reason)
       std::string get_reset_reason() const { return last_reset_reason_; }
 
-      // Milliseconds since last successful data read (0 if never read)
+      // Milliseconds since the last successful data read; UINT32_MAX if never read.
       uint32_t get_data_age_ms() const;
+      bool has_ever_read_data() const { return last_successful_read_.load() != 0; }
+      bool is_protocol_active() const;
+      uint32_t get_usb_stall_count() const { return transport_ ? transport_->get_stall_count() : 0; }
+      uint32_t get_usb_recovery_count() const { return transport_ ? transport_->get_recovery_count() : 0; }
 
     protected:
       bool simulation_mode_{false};
@@ -174,22 +179,46 @@ namespace esphome
       std::atomic<uint32_t> last_successful_read_{0};
       std::atomic<uint32_t> consecutive_failures_{0};
       uint32_t max_consecutive_failures_{5};
-      static constexpr uint32_t DATA_STALE_TIMEOUT_MS = 60000;  // 60s without successful read → reset
+      static constexpr uint32_t DATA_STALE_TIMEOUT_MS = 60000;  // 60s without successful read → clear data
+      bool stale_data_cleared_{false};
       UpsData ups_data_;
       mutable std::mutex data_mutex_;  // Protect ups_data_ access
 
-      // Background USB read task -- keeps loop() non-blocking
+      // Background USB read task -- keeps loop() non-blocking. All USB I/O and
+      // all protocol/transport lifecycle changes happen on this task only.
       TaskHandle_t usb_read_task_handle_{nullptr};
       std::atomic<bool> new_data_available_{false};
       std::atomic<bool> usb_task_running_{false};
+      std::atomic<bool> usb_task_active_{false};
       std::atomic<uint32_t> usb_task_heartbeat_{0};
-      std::atomic<uint32_t> usb_task_generation_{0};
-    std::atomic<bool> transport_needs_reinit_{false};
-    std::atomic<bool> usb_task_active_{false};
-    std::atomic<uint32_t> recovery_attempts_{0};
       static void usb_read_task(void *param);
       void usb_read_loop();
+      // Sleep on the USB task while keeping the heartbeat fresh, and return
+      // early if the transport connection state changes.
+      void usb_task_sleep(uint32_t ms);
+
+      // Recovery escalation: a transport recovery (USB root-port power cycle)
+      // is requested when the device stops responding; if several recoveries
+      // pass without a successful read, the ESP reboots as a last resort.
+      std::atomic<uint32_t> recovery_attempts_{0};
+      std::atomic<uint32_t> last_recovery_request_ms_{0};
+      static constexpr uint32_t TASK_HUNG_MS = 60000;
+      static constexpr uint32_t TASK_HUNG_REBOOT_MS = 180000;
+      static constexpr uint32_t RECOVERY_MIN_INTERVAL_MS = 30000;
+      static constexpr uint32_t DETECTION_FAILURES_PER_RECOVERY = 3;
+      static constexpr uint32_t MAX_RECOVERIES_BEFORE_REBOOT = 3;
+      static constexpr uint32_t REBOOT_AFTER_STALE_MS = 300000;
+      void request_transport_recovery(const char *reason);
       void check_task_health();
+
+      // NVS writes (event log persistence, pre-crash diagnostics) run on their
+      // own low-priority task so neither the main loop nor the USB task blocks
+      // on flash.
+      TaskHandle_t nvs_task_handle_{nullptr};
+      std::atomic<bool> nvs_task_running_{false};
+      static void nvs_task(void *param);
+      void nvs_loop();
+      void write_diagnostics_to_nvs();
 
       // Command queue -- main loop pushes, background task executes.
       // Keeps all USB I/O off the main loop.
@@ -208,10 +237,9 @@ namespace esphome
       // Cached protocol name for thread-safe main-loop access
       std::string cached_protocol_name_{"None"};
 
-    // Fast polling for timer countdown (managed by background task)
-    bool fast_polling_mode_{false};
-    uint32_t last_waiting_log_{0};
-    uint32_t last_stack_check_ms_{0};
+      // Fast polling for timer countdown (managed by background task)
+      bool fast_polling_mode_{false};
+      uint32_t last_waiting_log_{0};
       static constexpr uint32_t FAST_POLL_INTERVAL_MS = 2000;
 
       // Error rate limiting to prevent log spam
@@ -331,6 +359,10 @@ namespace esphome
       virtual bool set_shutdown_delay(int seconds) { return false; }
       virtual bool set_start_delay(int seconds) { return false; }
       virtual bool set_reboot_delay(int seconds) { return false; }
+
+      // Called after a command was executed so protocols that poll static
+      // settings infrequently can refresh them on the next read.
+      virtual void request_full_refresh() {}
 
     protected:
       UpsHidComponent *parent_;

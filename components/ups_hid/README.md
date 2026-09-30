@@ -13,7 +13,7 @@ An ESPHome component for monitoring UPS devices via USB connection on ESP32-S3. 
 - 🏠 **Home Assistant integration**: Automatic entity discovery via ESPHome API
 - 🔌 **Multi-protocol support**: APC HID, CyberPower HID, Tripp Lite HID, Generic HID
 - 🎯 **Auto-detection**: Intelligent protocol detection based on USB vendor IDs
-- 🔧 **Robust USB handling**: ESP-IDF v5.4 compatible with 3-tier reconnection recovery
+- 🔧 **Robust USB handling**: Never abandons USB transfers; recovers an unresponsive UPS by power-cycling the USB root port (ESP-IDF ≥ 5.4)
 - 🧪 **Simulation mode**: Test integration without physical UPS device
 
 ## Quick Start
@@ -93,7 +93,13 @@ The Tripp Lite protocol uses a dedicated HID report descriptor parser to automat
 - **Vendor-specific usage page (0xFFFF)**: Decodes proprietary Tripp Lite HID usages for flow control, power, and status
 - **Page-confusion fallback**: Handles Tripp Lite firmware quirks where vendor-specific usages appear on the standard Power Device page
 - **Descriptor-driven scaling**: Raw values are scaled using device-reported unit exponents (e.g., voltage exponent -1 for 0.1V resolution)
+- **NUT-style polling**: Only reports carrying measurements and status flags are read every `update_interval`; identity and configuration reports are refreshed every 30 s or right after a command, like `usbhid-ups`
+- **NUT-style status**: Online/On Battery comes from the UPS's `ACPresent` flag, low battery from `BelowRemainingCapacityLimit`/`ShutdownImminent` and the configured `RemainingCapacityLimit`, overload/AVR/fault from the corresponding PresentStatus bits
 - **Tested on**: ECO850LCD (PID 0x3024) -- known quirks documented and handled
+
+### USB Robustness
+
+ESP-IDF's USB Host stack has two properties this component is built around: control transfers never time out on the host side (`usb_transfer_t::timeout_ms` is not implemented), and a device may only be closed once no control transfer is in flight. The transport therefore never abandons a transfer. If the UPS stops answering, the component power-cycles the USB root port (`usb_host_lib_set_root_port_power`), which cancels the pending transfer, tears the device down cleanly and re-enumerates it with a fresh bus reset. Recovery is also triggered after repeated protocol detection failures. While it runs, NUT clients see `DATA-STALE`, and the event is recorded in the persistent event log (`ups.debug.event.N`). If three recoveries pass without a successful read, or the USB task stays blocked for 3 minutes, the ESP reboots as a last resort.
 
 ## Configuration Reference
 
