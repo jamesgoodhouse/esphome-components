@@ -105,7 +105,13 @@
 // Battery System Usage IDs (HID Power Device Class v1.1)
 // =============================================================================
 
+// Battery Thresholds
+#define HID_USAGE_BAT_REMAINING_CAPACITY_LIMIT  0x0029  // Low battery threshold (%), NUT battery.charge.low
+#define HID_USAGE_BAT_REMAINING_TIME_LIMIT      0x002A  // Low runtime threshold (s), NUT battery.runtime.low
+
 // Battery Status
+#define HID_USAGE_BAT_BELOW_REMAINING_CAPACITY_LIMIT 0x0042  // Low battery flag, NUT "LB"
+#define HID_USAGE_BAT_REMAINING_TIME_LIMIT_EXPIRED   0x0043  // Runtime limit expired, NUT "LB"
 #define HID_USAGE_BAT_CHARGING                  0x0044
 #define HID_USAGE_BAT_DISCHARGING               0x0045
 #define HID_USAGE_BAT_FULLY_CHARGED             0x0046

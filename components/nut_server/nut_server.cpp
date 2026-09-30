@@ -5,6 +5,7 @@
 #include "esphome/core/hal.h"
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <iomanip>
 #include <sstream>
@@ -289,21 +290,27 @@ void NutServerComponent::accept_clients() {
 void NutServerComponent::handle_client(NutClient &client) {
 #ifdef USE_ESP32
   char buffer[MAX_COMMAND_LENGTH];
-  int bytes_received = recv(client.socket_fd, buffer, sizeof(buffer) - 1, 0);
+  int bytes_received = recv(client.socket_fd, buffer, sizeof(buffer), 0);
 
   if (bytes_received > 0) {
-    buffer[bytes_received] = '\0';
-
-    // Remove trailing newline
-    char *newline = strchr(buffer, '\n');
-    if (newline) *newline = '\0';
-    newline = strchr(buffer, '\r');
-    if (newline) *newline = '\0';
-
     client.last_activity = millis();
+    client.rx_buffer.append(buffer, bytes_received);
 
-    ESP_LOGV(TAG, "Received command: %s", buffer);
-    process_command(client, std::string(buffer));
+    // The protocol is line based; a read may hold several commands or only
+    // part of one, so process every complete line and keep the remainder.
+    size_t nl;
+    while (client.is_active() && (nl = client.rx_buffer.find('\n')) != std::string::npos) {
+      std::string line = client.rx_buffer.substr(0, nl);
+      client.rx_buffer.erase(0, nl + 1);
+      while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
+      ESP_LOGV(TAG, "Received command: %s", line.c_str());
+      process_command(client, line);
+    }
+
+    if (client.is_active() && client.rx_buffer.size() > MAX_RX_BUFFER) {
+      ESP_LOGW(TAG, "Client %s sent an overlong line, disconnecting", client.remote_ip.c_str());
+      disconnect_client(client);
+    }
 
   } else if (bytes_received == 0) {
     // Client disconnected cleanly
@@ -391,7 +398,7 @@ void NutServerComponent::process_command(NutClient &client, const std::string &c
       handle_list_var(client, subargs);
     } else if (subcmd == "CMD") {
       handle_list_cmd(client, subargs);
-    } else if (subcmd == "CLIENTS") {
+    } else if (subcmd == "CLIENT" || subcmd == "CLIENTS") {
       handle_list_clients(client);
     } else if (subcmd == "RW") {
       handle_list_rwvar(client, subargs);
@@ -473,6 +480,7 @@ void NutServerComponent::handle_login(NutClient &client, const std::string &args
       send_error(client, "UNKNOWN-UPS");
       return;
     }
+    client.logged_in = true;
     send_response(client, "OK\n");
     ESP_LOGD(TAG, "Client login accepted for UPS %s", get_ups_name().c_str());
     return;
@@ -481,26 +489,38 @@ void NutServerComponent::handle_login(NutClient &client, const std::string &args
   // Standard NUT protocol: LOGIN <upsname> (1 argument)
   // Authentication should have been done via USERNAME + PASSWORD commands
   if (parts.size() == 1) {
+    if (parts[0] != get_ups_name()) {
+      send_error(client, "UNKNOWN-UPS");
+      return;
+    }
+
     // If no authentication is configured, allow login without credentials
     if (!auth_enabled()) {
       client.state = ClientState::AUTHENTICATED;
+      client.logged_in = true;
       send_response(client, "OK\n");
       ESP_LOGD(TAG, "Client login accepted (no auth required) for UPS %s", parts[0].c_str());
       return;
     }
 
     // Password is required but client hasn't authenticated
-    // Check if temp credentials were provided via USERNAME/PASSWORD
-    if (!client.temp_username.empty() && !client.temp_password.empty()) {
-      if (authenticate(client.temp_username, client.temp_password)) {
-        client.state = ClientState::AUTHENTICATED;
-        client.username = client.temp_username;
-        client.temp_username.clear();
-        client.temp_password.clear();
-        send_response(client, "OK\n");
-        ESP_LOGD(TAG, "Client %s authenticated via LOGIN as %s", client.remote_ip.c_str(), client.username.c_str());
-        return;
-      }
+    if (client.temp_username.empty()) {
+      send_error(client, "USERNAME-REQUIRED");
+      return;
+    }
+    if (client.temp_password.empty()) {
+      send_error(client, "PASSWORD-REQUIRED");
+      return;
+    }
+    if (authenticate(client.temp_username, client.temp_password)) {
+      client.state = ClientState::AUTHENTICATED;
+      client.username = client.temp_username;
+      client.temp_username.clear();
+      client.temp_password.clear();
+      client.logged_in = true;
+      send_response(client, "OK\n");
+      ESP_LOGD(TAG, "Client %s authenticated via LOGIN as %s", client.remote_ip.c_str(), client.username.c_str());
+      return;
     }
 
     send_error(client, "ACCESS-DENIED");
@@ -551,33 +571,37 @@ void NutServerComponent::handle_list_var(NutClient &client, const std::string &a
     return;
   }
 
-  if (!has_ups_data() || !ups_hid_) {
-    send_error(client, "DATA-STALE");
+  if (!ups_hid_) {
+    send_error(client, "DRIVER-NOT-CONNECTED");
     return;
   }
 
   // Single snapshot: one mutex acquisition instead of hundreds.
   auto snapshot = ups_hid_->get_ups_data();
+  if (send_data_error(client, data_state(&snapshot))) {
+    return;
+  }
 
   std::string ups_name = get_ups_name();
   std::string response = "BEGIN LIST VAR " + ups_name + "\n";
 
   std::vector<std::string> variables = {
-    "battery.capacity", "battery.charge", "battery.charge.low", "battery.charge.warning",
-    "battery.mfr.date", "battery.runtime", "battery.type",
-    "battery.voltage", "battery.voltage.low", "battery.voltage.nominal",
+    "battery.charge", "battery.charge.low", "battery.charge.warning",
+    "battery.mfr.date", "battery.runtime", "battery.runtime.low", "battery.type",
+    "battery.voltage", "battery.voltage.nominal",
     "device.mfr", "device.model", "device.serial", "device.type",
     "driver.name", "driver.version", "driver.version.internal",
-    "input.frequency", "input.voltage", "input.voltage.nominal",
+    "input.frequency", "input.frequency.nominal", "input.voltage", "input.voltage.nominal",
     "input.transfer.low", "input.transfer.high",
     "output.current", "output.frequency", "output.frequency.nominal",
     "output.voltage", "output.voltage.nominal",
-    "ups.beeper.status", "ups.delay.shutdown",
+    "ups.alarm", "ups.beeper.status",
+    "ups.delay.reboot", "ups.delay.shutdown", "ups.delay.start",
     "ups.firmware", "ups.load",
     "ups.mfr", "ups.model",
     "ups.power.nominal", "ups.realpower", "ups.realpower.nominal",
     "ups.serial", "ups.status", "ups.test.result",
-    "ups.timer.reboot", "ups.timer.shutdown",
+    "ups.timer.reboot", "ups.timer.shutdown", "ups.timer.start",
     "ups.debug.read.status",
     "ups.debug.reset.reason",
     "ups.debug.event.count",
@@ -617,7 +641,19 @@ void NutServerComponent::handle_get_var(NutClient &client, const std::string &ar
     return;
   }
 
-  std::string value = get_ups_var(parts[1]);
+  if (!ups_hid_) {
+    send_error(client, "DRIVER-NOT-CONNECTED");
+    return;
+  }
+  auto snapshot = ups_hid_->get_ups_data();
+  // Diagnostics must stay readable while the UPS is unreachable; everything
+  // else follows upsd and reports the data state.
+  bool debug_var = parts[1].compare(0, 10, "ups.debug.") == 0;
+  if (!debug_var && send_data_error(client, data_state(&snapshot))) {
+    return;
+  }
+
+  std::string value = resolve_ups_var(parts[1], snapshot);
   if (!value.empty()) {
     std::string response = "VAR " + get_ups_name() + " " + parts[1] + " \"" + value + "\"\n";
     send_response(client, response);
@@ -632,10 +668,10 @@ void NutServerComponent::handle_get_numlogins(NutClient &client, const std::stri
     return;
   }
 
-  // Count authenticated clients that have sent LOGIN for this UPS
+  // Count clients that have sent LOGIN for this UPS
   int num_logins = 0;
   for (const auto &c : clients_) {
-    if (c.is_authenticated()) {
+    if (c.is_active() && c.logged_in) {
       num_logins++;
     }
   }
@@ -690,12 +726,9 @@ void NutServerComponent::handle_get_type(NutClient &client, const std::string &a
     return;
   }
 
-  // Determine type based on variable name
-  // RW variables (writable)
-  std::string var_type = "RO";
-  if (parts[1] == "ups.delay.shutdown") {
-    var_type = "RW STRING";
-  }
+  // No variables are writable (SET VAR is not supported), so every variable
+  // is plain NUMBER or STRING:<len> like upsd reports for read-only data.
+  std::string var_type = is_numeric_value(value) ? "NUMBER" : "STRING:" + std::to_string(std::max<size_t>(value.size(), 32));
 
   std::string response = "TYPE " + get_ups_name() + " " + parts[1] + " " + var_type + "\n";
   send_response(client, response);
@@ -719,23 +752,19 @@ void NutServerComponent::handle_list_cmd(NutClient &client, const std::string &a
 }
 
 void NutServerComponent::handle_list_clients(NutClient &client) {
-  std::string response = "BEGIN LIST CLIENT\n";
+  // upsd: LIST CLIENT <upsname> -> CLIENT <upsname> <ip> for every client
+  // that has LOGIN'ed to that UPS.
+  std::string ups_name = get_ups_name();
+  std::string response = "BEGIN LIST CLIENT " + ups_name + "\n";
 
-  uint32_t now = millis();
   // Note: clients_mutex_ is already held by the calling context (server loop)
-
-  for (size_t i = 0; i < clients_.size(); ++i) {
-    const auto &c = clients_[i];
-    if (c.is_active()) {
-      // Format: CLIENT <ip> <connected_time> <status>
-      std::string status = c.is_authenticated() ? "authenticated" : "connected";
-      uint32_t connected_time = (now - c.connect_time) / 1000; // seconds
-
-      response += "CLIENT " + c.remote_ip + " " + std::to_string(connected_time) + " " + status + "\n";
+  for (const auto &c : clients_) {
+    if (c.is_active() && c.logged_in) {
+      response += "CLIENT " + ups_name + " " + c.remote_ip + "\n";
     }
   }
 
-  response += "END LIST CLIENT\n";
+  response += "END LIST CLIENT " + ups_name + "\n";
   send_response(client, response);
 }
 
@@ -774,7 +803,9 @@ void NutServerComponent::handle_instcmd(NutClient &client, const std::string &ar
 }
 
 void NutServerComponent::handle_version(NutClient &client) {
-  std::string response = "VERSION \"" + std::string(NUT_VERSION) + "\"\n";
+  // Same banner format as upsd
+  std::string response = "Network UPS Tools upsd " + std::string(NUT_VERSION) +
+                         " (ESPHome) - https://www.networkupstools.org/\n";
   send_response(client, response);
 }
 
@@ -844,15 +875,40 @@ void NutServerComponent::handle_password(NutClient &client, const std::string &a
 }
 
 void NutServerComponent::handle_fsd(NutClient &client, const std::string &args) {
-  // FSD (Forced Shutdown) - this is a critical command
-  // For now, just acknowledge but don't actually shutdown
-  ESP_LOGW(TAG, "FSD (Forced Shutdown) command received from client");
+  // FSD <upsname>: a primary upsmon announces a forced shutdown. Like upsd we
+  // raise the FSD flag in ups.status so every other client shuts down too.
+  auto parts = split_args(args);
+  if (parts.size() != 1) {
+    send_error(client, "INVALID-ARGUMENT");
+    return;
+  }
+  if (parts[0] != get_ups_name()) {
+    send_error(client, "UNKNOWN-UPS");
+    return;
+  }
+  ESP_LOGW(TAG, "FSD (forced shutdown) set by %s", client.remote_ip.c_str());
+  if (ups_hid_) {
+    ups_hid_->record_event("Status: FSD set by " + client.remote_ip);
+  }
+  fsd_flag_ = true;
   send_response(client, "OK FSD-SET\n");
 }
 
 void NutServerComponent::handle_set_var(NutClient &client, const std::string &args) {
-  // SET VAR is not supported in this implementation
-  send_error(client, "CMD-NOT-SUPPORTED");
+  auto parts = split_args(args);
+  if (parts.size() < 3) {
+    send_error(client, "INVALID-ARGUMENT");
+    return;
+  }
+  if (parts[0] != get_ups_name()) {
+    send_error(client, "UNKNOWN-UPS");
+    return;
+  }
+  if (get_ups_var(parts[1]).empty()) {
+    send_error(client, "VAR-NOT-SUPPORTED");
+    return;
+  }
+  send_error(client, "READONLY");
 }
 
 void NutServerComponent::handle_list_rwvar(NutClient &client, const std::string &args) {
@@ -895,8 +951,7 @@ void NutServerComponent::handle_list_range(NutClient &client, const std::string 
 
 void NutServerComponent::handle_legacy_list_vars(NutClient &client, const std::string &ups_name) {
   // Legacy format for upsc -l: return simple variable names without quotes
-  if (!has_ups_data()) {
-    send_error(client, "DATA-STALE");
+  if (send_data_error(client, data_state())) {
     return;
   }
 
@@ -1003,7 +1058,7 @@ bool NutServerComponent::authenticate(const std::string &username, const std::st
 }
 
 std::string NutServerComponent::get_ups_var(const std::string &var_name) {
-  if (!has_ups_data() || !ups_hid_) {
+  if (!ups_hid_) {
     return "";
   }
 
@@ -1053,43 +1108,39 @@ std::string NutServerComponent::resolve_ups_var(const std::string &var_name,
     return data.battery.type;
   if (var_name == "battery.mfr.date" && !data.battery.mfr_date.empty())
     return data.battery.mfr_date;
-  if (var_name == "battery.voltage.low" && !std::isnan(data.battery.config_voltage))
-    return format_nut_value(std::to_string(data.battery.config_voltage));
-  if (var_name == "battery.capacity" && !std::isnan(data.battery.design_capacity))
-    return format_nut_value(std::to_string(data.battery.design_capacity));
   if (var_name == "battery.charge.low" && !std::isnan(data.battery.charge_low))
     return std::to_string(static_cast<int>(data.battery.charge_low));
   if (var_name == "battery.charge.warning" && !std::isnan(data.battery.charge_warning))
     return std::to_string(static_cast<int>(data.battery.charge_warning));
+  if (var_name == "battery.runtime.low" && !std::isnan(data.battery.runtime_low))
+    return std::to_string(static_cast<int>(data.battery.runtime_low * 60));
 
-  // Input power variables
-  if (var_name == "input.voltage") {
-    float v = data.power.input_voltage;
-    if (!std::isnan(v) && v > 0) return format_nut_value(std::to_string(v));
-  }
+  // Input power variables (0 V / 0 Hz are real readings while on battery)
+  if (var_name == "input.voltage" && !std::isnan(data.power.input_voltage))
+    return format_nut_value(std::to_string(data.power.input_voltage));
   if (var_name == "input.voltage.nominal" && !std::isnan(data.power.input_voltage_nominal))
     return format_nut_value(std::to_string(data.power.input_voltage_nominal));
   if (var_name == "input.frequency" && !std::isnan(data.power.frequency))
     return format_nut_value(std::to_string(data.power.frequency));
+  if (var_name == "input.frequency.nominal" && !std::isnan(data.power.input_frequency_nominal))
+    return std::to_string(static_cast<int>(std::round(data.power.input_frequency_nominal)));
   if (var_name == "input.transfer.low" && !std::isnan(data.power.input_transfer_low))
     return format_nut_value(std::to_string(data.power.input_transfer_low));
   if (var_name == "input.transfer.high" && !std::isnan(data.power.input_transfer_high))
     return format_nut_value(std::to_string(data.power.input_transfer_high));
 
   // Output power variables
-  if (var_name == "output.voltage") {
-    float v = data.power.output_voltage;
-    if (!std::isnan(v) && v > 0) return format_nut_value(std::to_string(v));
-  }
+  if (var_name == "output.voltage" && !std::isnan(data.power.output_voltage))
+    return format_nut_value(std::to_string(data.power.output_voltage));
   if (var_name == "output.voltage.nominal" && !std::isnan(data.power.output_voltage_nominal))
     return format_nut_value(std::to_string(data.power.output_voltage_nominal));
   if (var_name == "output.current" && !std::isnan(data.power.output_current))
     return format_nut_value(std::to_string(data.power.output_current));
   if (var_name == "output.frequency" && !std::isnan(data.power.output_frequency))
     return format_nut_value(std::to_string(data.power.output_frequency));
-  if (var_name == "output.frequency.nominal" && !std::isnan(data.power.input_voltage_nominal)) {
-    if (!std::isnan(data.power.frequency))
-      return std::to_string(static_cast<int>(std::round(data.power.frequency)));
+  if (var_name == "output.frequency.nominal") {
+    if (!std::isnan(data.power.input_frequency_nominal))
+      return std::to_string(static_cast<int>(std::round(data.power.input_frequency_nominal)));
     if (!std::isnan(data.power.input_voltage_nominal))
       return data.power.input_voltage_nominal <= 130.0f ? "60" : "50";
   }
@@ -1113,10 +1164,16 @@ std::string NutServerComponent::resolve_ups_var(const std::string &var_name,
   // Delay configuration
   if (var_name == "ups.delay.shutdown" && data.config.delay_shutdown >= 0)
     return std::to_string(data.config.delay_shutdown);
+  if (var_name == "ups.delay.start" && data.config.delay_start >= 0)
+    return std::to_string(data.config.delay_start);
+  if (var_name == "ups.delay.reboot" && data.config.delay_reboot >= 0)
+    return std::to_string(data.config.delay_reboot);
 
   // Timer values (-1 means inactive/not counting down)
   if (var_name == "ups.timer.shutdown")
     return std::to_string(data.test.timer_shutdown >= 0 ? data.test.timer_shutdown : -1);
+  if (var_name == "ups.timer.start")
+    return std::to_string(data.test.timer_start >= 0 ? data.test.timer_start : -1);
   if (var_name == "ups.timer.reboot")
     return std::to_string(data.test.timer_reboot >= 0 ? data.test.timer_reboot : -1);
 
@@ -1124,20 +1181,26 @@ std::string NutServerComponent::resolve_ups_var(const std::string &var_name,
   if (var_name == "ups.test.result" && !data.test.ups_test_result.empty())
     return data.test.ups_test_result;
 
-  // UPS status (built from the snapshot, no extra mutex acquisitions)
+  // UPS status and alarms (built from the snapshot, no extra mutex acquisitions)
   if (var_name == "ups.status")
     return get_ups_status(&data);
+  if (var_name == "ups.alarm") {
+    std::string alarm = data.nut_alarm();
+    if (!alarm.empty()) return alarm;
+  }
 
   // Debug diagnostics
   if (ups_hid_) {
     if (var_name == "ups.debug.read.status") {
       uint32_t age_ms = ups_hid_->get_data_age_ms();
-      char buf[128];
-      snprintf(buf, sizeof(buf), "proto=%s stale=%u/%u age=%ums",
+      char buf[160];
+      snprintf(buf, sizeof(buf), "proto=%s stale=%u/%u age=%ums usb_stalls=%u usb_recoveries=%u",
                data.power.status.empty() ? "(empty)" : data.power.status.c_str(),
                data.power.status_stale_cycles,
                data.power.MAX_STALE_CYCLES,
-               age_ms);
+               age_ms == UINT32_MAX ? 0 : age_ms,
+               ups_hid_->get_usb_stall_count(),
+               ups_hid_->get_usb_recovery_count());
       return std::string(buf);
     }
 
@@ -1283,57 +1346,63 @@ std::vector<std::string> NutServerComponent::split_args(const std::string &args)
   return result;
 }
 
-bool NutServerComponent::has_ups_data() const {
-  return ups_hid_ && ups_hid_->is_connected();
+// upsd semantics: DRIVER-NOT-CONNECTED until a UPS protocol has produced data,
+// DATA-STALE when the last successful read is older than the max age (or the
+// power state could not be determined). Like upsd, the last values are still
+// served during a short USB recovery until they age out.
+DataState NutServerComponent::data_state(const ups_hid::UpsData *snapshot) const {
+  if (!ups_hid_) return DataState::DRIVER_NOT_CONNECTED;
+  if (!ups_hid_->has_ever_read_data()) return DataState::DRIVER_NOT_CONNECTED;
+
+  uint32_t max_age_ms = std::max<uint32_t>(MIN_DATA_MAX_AGE_MS, 3 * ups_hid_->get_update_interval());
+  if (ups_hid_->get_data_age_ms() > max_age_ms) {
+    return DataState::STALE;
+  }
+
+  ups_hid::UpsData local;
+  if (!snapshot) {
+    local = ups_hid_->get_ups_data();
+    snapshot = &local;
+  }
+  return snapshot->has_power_status() ? DataState::OK : DataState::STALE;
+}
+
+bool NutServerComponent::send_data_error(NutClient &client, DataState state) {
+  switch (state) {
+    case DataState::OK:
+      return false;
+    case DataState::DRIVER_NOT_CONNECTED:
+      send_error(client, "DRIVER-NOT-CONNECTED");
+      return true;
+    case DataState::STALE:
+    default:
+      send_error(client, "DATA-STALE");
+      return true;
+  }
+}
+
+bool NutServerComponent::is_numeric_value(const std::string &value) {
+  if (value.empty()) return false;
+  char *end = nullptr;
+  std::strtod(value.c_str(), &end);
+  return end != value.c_str() && *end == '\0';
 }
 
 std::string NutServerComponent::get_ups_status(const ups_hid::UpsData *snapshot) const {
-  if (!ups_hid_ || !ups_hid_->is_connected()) {
+  if (!ups_hid_) {
     return "";
   }
 
-  // Use provided snapshot or fetch a fresh one.
   ups_hid::UpsData local;
   if (!snapshot) {
     local = ups_hid_->get_ups_data();
     snapshot = &local;
   }
 
-  const auto &d = *snapshot;
-
-  // Determine online/on-battery from the data directly (avoids data_mutex_).
-  const auto &s = d.power.status;
-  bool on_battery = (s == "On Battery");
-  bool online = !on_battery && (!s.empty() && s != "Unknown");
-  if (!online && !on_battery)
-    online = d.power.input_voltage_valid();
-
-  std::string result;
-  auto append = [&](const char *flag) {
-    if (!result.empty()) result += ' ';
-    result += flag;
-  };
-
-  if (online)      append("OL");
-  else if (on_battery) append("OB");
-
-  if (d.battery.is_low())  append("LB");
-
-  bool charging = online && d.battery.is_valid() &&
-                  !std::isnan(d.battery.level) && d.battery.level < 100.0f;
-  if (charging) append("CHRG");
-
-  if (d.power.boost_active)      append("BOOST");
-  if (d.power.buck_active)       append("TRIM");
-  if (d.power.over_temperature)  append("OVER");
-  if (d.power.shutdown_imminent) append("FSD");
-  if (d.power.awaiting_power)    append("OFF");
-  if (d.battery.needs_replacement) append("RB");
-
-  bool fault = d.power.is_input_out_of_range() ||
-               (!d.power.is_valid() && !d.battery.is_valid());
-  if (fault) append("ALARM");
-
+  std::string result = snapshot->nut_status();
+  if (fsd_flag_.load() && !result.empty()) {
+    result = "FSD " + result;
+  }
   return result;
 }
 

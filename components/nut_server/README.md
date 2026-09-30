@@ -99,20 +99,28 @@ wifi:
 | `LIST VAR <ups>` | List all variables for UPS | No |
 | `GET VAR <ups> <var>` | Get specific variable value | No |
 | `LIST CMD <ups>` | List available commands | No |
-| `LIST CLIENTS` | List connected clients | No |
-| `LIST RW <ups>` | List read-write variables | No |
+| `LIST CLIENT <ups>` | List clients logged in to the UPS | No |
+| `LIST RW <ups>` | List read-write variables (none) | No |
 | `LIST ENUM <ups> <var>` | List enum values for variable | No |
 | `LIST RANGE <ups> <var>` | List range for variable | No |
+| `GET TYPE <ups> <var>` | Variable type (`NUMBER` / `STRING:n`) | No |
 
 Read-only commands (LIST, GET) do not require authentication per the NUT protocol specification. Only write commands (SET, INSTCMD, FSD) require authentication when a password is configured.
+
+### Data availability (same semantics as `upsd`)
+
+`LIST VAR` and `GET VAR` answer `ERR DRIVER-NOT-CONNECTED` until the UPS has been detected and read at least once, and `ERR DATA-STALE` when the last successful read is older than `max(15 s, 3 × update_interval)` (upsd's `MAXAGE`) or the power state is unknown. Like upsd, the last known values are still served during a short USB recovery until they age out. NUT clients such as `upsmon` and Synology DSM treat both errors exactly like a real NUT server going stale. Diagnostic variables (`ups.debug.*`) remain readable so the event log can be inspected while the UPS is unreachable.
 
 ### Control Commands
 
 | Command | Description | Authentication Required |
 |---------|-------------|------------------------|
-| `LOGIN <user> <pass>` | Authenticate client | No |
-| `LOGOUT` | End authenticated session | No |
+| `USERNAME <user>` / `PASSWORD <pass>` | Provide credentials | No |
+| `LOGIN <ups>` | Register as a monitoring client | Yes* |
+| `LOGOUT` | End session | No |
 | `INSTCMD <ups> <cmd>` | Execute instant command | Yes* |
+| `FSD <ups>` | Forced shutdown: raises the `FSD` flag in `ups.status` for all clients | Yes* |
+| `SET VAR <ups> <var> <value>` | Not supported; answers `ERR READONLY` | Yes* |
 
 ### Supported Instant Commands
 
@@ -140,40 +148,47 @@ The following NUT variables are exposed based on available UPS data:
 
 ### Battery Status
 - `battery.charge` - Battery charge percentage (0-100)
-- `battery.charge.low` - Low battery threshold
+- `battery.charge.low` - Low battery threshold configured in the UPS
 - `battery.charge.warning` - Warning battery threshold
+- `battery.runtime.low` - Low runtime threshold in seconds
 - `battery.voltage` - Battery voltage
 - `battery.voltage.nominal` - Nominal battery voltage
 - `battery.runtime` - Estimated runtime in seconds
 - `battery.type` - Battery chemistry type
+- `battery.mfr.date` - Battery manufacture date
 
 ### Power Status
-- `input.voltage` - Input voltage from mains
+- `input.voltage` - Input voltage from mains (`0.0` while on battery, as NUT reports it)
 - `input.voltage.nominal` - Nominal input voltage
-- `input.frequency` - Input frequency
-- `output.voltage` - Output voltage to load
+- `input.frequency` / `input.frequency.nominal` - Input frequency
+- `input.transfer.low` / `input.transfer.high` - AVR transfer thresholds
+- `output.voltage` / `output.voltage.nominal` - Output voltage to load
 - `output.current` - Output current in amps
+- `output.frequency` / `output.frequency.nominal` - Output frequency
 - `ups.load` - Load percentage (0-100)
-- `ups.power` - Output power in watts
-- `ups.realpower.nominal` - Nominal real power
-- `ups.status` - Combined status flags:
-  - `OL` - Online (mains power present)
-  - `OB` - On Battery
-  - `LB` - Low Battery
-  - `FSD` - Forced Shutdown (shutdown imminent)
-  - `OFF` - Awaiting power
-  - `RB` - Replace Battery
-  - `CHRG` - Charging
-  - `TRIM` - AVR trim active
-  - `BOOST` - AVR boost active
-  - `OVER` - Overloaded
-  - `TEST` - Test in progress
-  - `ALARM` - Alarm condition
+- `ups.realpower` - Output power in watts
+- `ups.power.nominal` / `ups.realpower.nominal` - Nominal ratings (only when reported by the UPS)
+- `ups.status` - Status tokens with the same meaning as NUT's `usbhid-ups`:
+  - `OL` / `OB` - Online / On Battery, from the UPS's `ACPresent` flag
+  - `DISCHRG` / `CHRG` - Battery discharging / charging, from the UPS's flags
+  - `LB` - Low battery: the UPS's `BelowRemainingCapacityLimit`/`ShutdownImminent` flags, or charge/runtime below the configured thresholds
+  - `RB` - Replace battery
+  - `OVER` - Output overload
+  - `TRIM` / `BOOST` - AVR trim / boost active
+  - `ALARM` - One or more alarms active (see `ups.alarm`)
+  - `FSD` - Forced shutdown announced by a primary `upsmon` via `FSD`
+- `ups.alarm` - Active alarm text (`Replace battery!`, `Shutdown imminent!`, `Temperature too high!`, `Internal UPS fault!`, `Awaiting power!`)
+- `ups.beeper.status` - `enabled` / `disabled` / `muted`
 - `ups.test.result` - Last test result
 
-### Configuration
-- `ups.delay.shutdown` - Shutdown delay in seconds
-- `ups.delay.start` - Startup delay in seconds
+### Configuration and timers
+- `ups.delay.shutdown` / `ups.delay.start` / `ups.delay.reboot` - Configured delays in seconds
+- `ups.timer.shutdown` / `ups.timer.start` / `ups.timer.reboot` - Running countdowns (`-1` when inactive)
+
+### Diagnostics (non-standard)
+- `ups.debug.read.status` - Data age, status staleness, USB stall and recovery counters
+- `ups.debug.reset.reason` - Reason for the last ESP reset
+- `ups.debug.event.count` / `ups.debug.event.N` - Persisted state-change and recovery event log
 
 ## Client Connection Examples
 
@@ -203,7 +218,7 @@ LIST UPS
 LIST VAR esphome_ups
 GET VAR esphome_ups battery.charge
 LIST CMD esphome_ups
-LIST CLIENTS
+LIST CLIENT esphome_ups
 INSTCMD esphome_ups beeper.mute
 LOGOUT
 ```

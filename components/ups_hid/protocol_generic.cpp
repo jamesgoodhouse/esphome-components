@@ -626,6 +626,7 @@ void GenericHidProtocol::parse_present_status(uint8_t *data, size_t len, UpsData
 
     if (status & 0x20)
     {
+      ups_data.power.overload = true;
       // Append overload status to power status
       if (ups_data.power.status.empty())
       {

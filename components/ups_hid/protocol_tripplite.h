@@ -16,7 +16,10 @@ namespace ups_hid {
  * Supports two data reading strategies:
  * 1. **Descriptor-based** (preferred): Parses the device's HID report descriptor
  *    to know exactly which report ID contains which data field. Handles unit
- *    exponents and physical conversion automatically.
+ *    exponents and physical conversion automatically. Like NUT's usbhid-ups it
+ *    polls only the reports carrying measurements and status flags every
+ *    cycle, and refreshes static/configuration reports every 30 s or after a
+ *    command was sent.
  * 2. **Heuristic** (fallback): Reads all reports and classifies values by range.
  *    Used when the report descriptor cannot be fetched or parsed.
  *
@@ -66,6 +69,8 @@ public:
     bool set_start_delay(int seconds) override;
     bool set_reboot_delay(int seconds) override;
 
+    void request_full_refresh() override { force_full_read_ = true; }
+
 private:
     // HID Report structure (matches pattern from other protocols)
     struct HidReport {
@@ -101,6 +106,13 @@ private:
     static constexpr uint8_t REPORT_FAIL_THRESHOLD = 5;
     bool device_info_read_{false};
 
+    // Descriptor mode polling: reports carrying measurements/status flags are
+    // read every cycle, everything else only on a full refresh.
+    std::set<uint8_t> dynamic_reports_;
+    uint32_t last_full_read_ms_{0};
+    bool force_full_read_{true};
+    static constexpr uint32_t FULL_REFRESH_INTERVAL_MS = 30000;
+
     // === HID communication ===
     bool read_hid_report(uint8_t report_id, HidReport &report);
     bool write_hid_feature_report(uint8_t report_id, const uint8_t* data, size_t len);
@@ -108,6 +120,7 @@ private:
     // === Initialization helpers ===
     void enumerate_reports();              // Brute-force enumeration (heuristic mode)
     void enumerate_reports_from_descriptor(); // Descriptor-based enumeration
+    void classify_reports_from_descriptor();  // Split reports into per-cycle vs full-refresh sets
     void determine_scaling_factors();      // Heuristic mode only
 
     // === Device information ===
@@ -137,27 +150,8 @@ private:
     // === Heuristic data reading (fallback) ===
     bool read_data_heuristic(UpsData &data);
 
-    // Heuristic parser methods
-    void parse_battery_data(UpsData &data);
-    void parse_power_summary(UpsData &data);
-    void parse_status_flags(UpsData &data);
-    void parse_input_data(UpsData &data);
-    void parse_output_data(UpsData &data);
-    void parse_load_data(UpsData &data);
-    void parse_beeper_status(UpsData &data);
-    void parse_delay_configuration(UpsData &data);
-    void parse_timer_data(UpsData &data);
-    void parse_test_result(UpsData &data);
-    void parse_power_nominal(UpsData &data);
-    void parse_frequency_data(UpsData &data);
-    void parse_transfer_limits(UpsData &data);
-
     // Value extraction helpers (heuristic mode)
-    float read_single_byte_value(const HidReport &report, uint8_t byte_index = 1);
-    uint16_t read_16bit_le_value(const HidReport &report, uint8_t start_index = 1);
     float apply_battery_voltage_scale(float raw_value);
-    float apply_io_voltage_scale(float raw_value);
-    float apply_io_frequency_scale(float raw_value);
 
     // Timer sentinel value
     static constexpr uint16_t TIMER_INACTIVE = 0xFFFF;

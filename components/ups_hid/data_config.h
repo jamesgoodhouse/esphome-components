@@ -2,6 +2,7 @@
 
 #include <string>
 #include <cstdint>
+#include <cmath>
 
 namespace esphome {
 namespace ups_hid {
@@ -132,6 +133,25 @@ struct ConfigData {
   
   bool is_valid() const {
     return has_timing_config() || has_beeper_config() || has_sensitivity_config() || has_thresholds();
+  }
+
+  // Merge fields from a fresh read, keeping old values where the new read did
+  // not produce one (settings are only polled on full refreshes).
+  void merge_from(const ConfigData& other) {
+    if (other.delay_shutdown != -1) delay_shutdown = other.delay_shutdown;
+    if (other.delay_start != -1) delay_start = other.delay_start;
+    if (other.delay_reboot != -1) delay_reboot = other.delay_reboot;
+    if (!other.beeper_status.empty() || other.beeper_state != BEEPER_UNKNOWN) {
+      beeper_status = other.beeper_status;
+      beeper_state = other.beeper_state;
+    }
+    if (!other.input_sensitivity.empty() || other.sensitivity_level != SENSITIVITY_UNKNOWN) {
+      input_sensitivity = other.input_sensitivity;
+      sensitivity_level = other.sensitivity_level;
+    }
+    if (!std::isnan(other.low_battery_threshold)) low_battery_threshold = other.low_battery_threshold;
+    if (!std::isnan(other.critical_battery_threshold)) critical_battery_threshold = other.critical_battery_threshold;
+    if (!std::isnan(other.high_temperature_threshold)) high_temperature_threshold = other.high_temperature_threshold;
   }
   
   void reset() { 

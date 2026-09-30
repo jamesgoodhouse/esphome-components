@@ -32,15 +32,25 @@ static const char *const TAG = "nut_server";
 // NUT protocol constants
 static constexpr uint16_t DEFAULT_NUT_PORT = 3493;
 static constexpr size_t MAX_COMMAND_LENGTH = 256;
-static constexpr size_t MAX_RESPONSE_LENGTH = 2048;
+static constexpr size_t MAX_RX_BUFFER = 1024;         // Disconnect clients sending longer lines
 static constexpr uint8_t DEFAULT_MAX_CLIENTS = 8;
 static constexpr uint8_t MAX_LOGIN_ATTEMPTS = 3;
 static constexpr uint32_t CLIENT_TIMEOUT_MS = 30000;  // 30 seconds
 static constexpr uint32_t SEND_TIMEOUT_MS = 3000;     // 3 seconds max for send_response
+// Data older than this is reported as DATA-STALE (upsd's MAXAGE default is 15 s);
+// scaled up for long polling intervals in data_state().
+static constexpr uint32_t MIN_DATA_MAX_AGE_MS = 15000;
 
 // NUT protocol version
 static constexpr const char* NUT_VERSION = "2.8.0";
 static constexpr const char* UPSD_VERSION = "upsd 2.8.0 ESPHome";
+
+// Mirrors upsd's data availability states
+enum class DataState {
+  OK,
+  STALE,                 // ERR DATA-STALE: driver connected, data too old / status unknown
+  DRIVER_NOT_CONNECTED,  // ERR DRIVER-NOT-CONNECTED: no UPS protocol active yet
+};
 
 // Client states
 enum class ClientState {
@@ -66,6 +76,8 @@ struct NutClient {
   std::string remote_ip;
   std::string temp_username;  // For USERNAME/PASSWORD flow
   std::string temp_password;  // For USERNAME/PASSWORD flow
+  std::string rx_buffer;      // Partial line received so far
+  bool logged_in{false};      // Sent LOGIN (counts towards NUMLOGINS)
 
   bool is_authenticated() const { return state == ClientState::AUTHENTICATED; }
   bool is_active() const { return socket_fd >= 0 && state != ClientState::DISCONNECTED; }
@@ -79,6 +91,8 @@ struct NutClient {
     remote_ip.clear();
     temp_username.clear();
     temp_password.clear();
+    rx_buffer.clear();
+    logged_in = false;
   }
 };
 
@@ -161,10 +175,14 @@ protected:
   std::vector<std::string> split_args(const std::string &args);
 
   // Data access using provider pattern (like status LED component)
-  bool has_ups_data() const;
+  DataState data_state(const ups_hid::UpsData *snapshot = nullptr) const;
+  bool has_ups_data() const { return data_state() == DataState::OK; }
+  // Sends the ERR matching a non-OK data state; returns true if one was sent.
+  bool send_data_error(NutClient &client, DataState state);
   std::string get_ups_status(const ups_hid::UpsData *snapshot = nullptr) const;
   std::string get_ups_manufacturer(const ups_hid::UpsData *snapshot = nullptr) const;
   std::string get_ups_model(const ups_hid::UpsData *snapshot = nullptr) const;
+  static bool is_numeric_value(const std::string &value);
 
 private:
   // Server task management
@@ -192,6 +210,9 @@ private:
   // Server state
   mutable std::mutex server_mutex_;
   bool shutdown_requested_{false};
+  // Forced shutdown flag set by a primary upsmon via FSD; like upsd it stays
+  // set (and is reported in ups.status) until restart.
+  std::atomic<bool> fsd_flag_{false};
 };
 
 }  // namespace nut_server

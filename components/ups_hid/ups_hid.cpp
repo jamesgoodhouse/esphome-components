@@ -55,27 +55,29 @@ void UpsHidComponent::setup() {
   last_reset_reason_ = std::string(reason) + " (" + std::to_string(static_cast<int>(reason_code)) + ")";
   ESP_LOGI(TAG, "Last reset reason: %s", last_reset_reason_.c_str());
 
-  // Read pre-crash diagnostics from NVS (written periodically by update())
+  // Read pre-crash diagnostics from NVS (written periodically by the NVS task)
   {
     nvs_handle_t h;
     if (nvs_open("ups_diag", NVS_READONLY, &h) == ESP_OK) {
-      uint32_t stack_hwm = 0, heap_free = 0, heap_min = 0, leaked = 0, uptime_s = 0;
+      uint32_t stack_hwm = 0, heap_free = 0, heap_min = 0, stalls = 0, recoveries = 0, uptime_s = 0;
       nvs_get_u32(h, "stack_hwm", &stack_hwm);
       nvs_get_u32(h, "heap_free", &heap_free);
       nvs_get_u32(h, "heap_min", &heap_min);
-      nvs_get_u32(h, "leaked", &leaked);
+      nvs_get_u32(h, "stalls", &stalls);
+      nvs_get_u32(h, "recoveries", &recoveries);
       nvs_get_u32(h, "uptime_s", &uptime_s);
       nvs_close(h);
 
       ESP_LOGI(TAG, "Pre-crash diagnostics (from %us uptime): "
-               "usb_read stack=%u, heap free=%u, heap min=%u, leaked transfers=%u",
-               uptime_s, stack_hwm, heap_free, heap_min, leaked);
+               "usb_read stack=%u, heap free=%u, heap min=%u, usb stalls=%u, usb recoveries=%u",
+               uptime_s, stack_hwm, heap_free, heap_min, stalls, recoveries);
 
       std::string boot_msg = std::string("Boot: reset=") + reason +
           " | pre-crash: stack=" + std::to_string(stack_hwm) +
           " heap=" + std::to_string(heap_free) +
           " heap_min=" + std::to_string(heap_min) +
-          " leaked=" + std::to_string(leaked) +
+          " stalls=" + std::to_string(stalls) +
+          " recoveries=" + std::to_string(recoveries) +
           " uptime=" + std::to_string(uptime_s) + "s";
       event_log_.record(format_event_timestamp(), boot_msg);
     } else {
@@ -91,12 +93,24 @@ void UpsHidComponent::setup() {
     return;
   }
 
-  // Launch background task for USB reads so loop() never blocks.
-  // Not pinned to a specific core -- the USB host stack may have
-  // core affinity requirements.
+  // Background task for USB reads so loop() never blocks. Not pinned to a
+  // core -- the USB host stack may have core affinity requirements.
   usb_task_running_.store(true);
-  xTaskCreate(usb_read_task, "ups_usb_read", 8192, this, 1, &usb_read_task_handle_);
+  if (xTaskCreate(usb_read_task, "ups_usb_read", 8192, this, 1, &usb_read_task_handle_) != pdTRUE) {
+    ESP_LOGE(TAG, "Failed to create USB read task");
+    usb_task_running_.store(false);
+    mark_failed();
+    return;
+  }
   ESP_LOGI(TAG, "USB read task started");
+
+#ifdef USE_ESP32
+  nvs_task_running_.store(true);
+  if (xTaskCreate(nvs_task, "ups_nvs", 4096, this, 1, &nvs_task_handle_) != pdTRUE) {
+    ESP_LOGW(TAG, "Failed to create NVS task; event log will not be persisted");
+    nvs_task_running_.store(false);
+  }
+#endif
 
   ESP_LOGCONFIG(TAG, log_messages::SETUP_COMPLETE);
 }
@@ -108,87 +122,101 @@ void UpsHidComponent::update() {
     update_sensors();
     check_state_changes();
   }
-
-#ifdef USE_ESP32
-  // Persist runtime diagnostics to NVS every 60s so they survive a crash.
-  uint32_t now = millis();
-  if (now - last_stack_check_ms_ > 60000) {
-    last_stack_check_ms_ = now;
-
-    uint32_t stack_hwm = 0;
-    if (usb_read_task_handle_) {
-      stack_hwm = uxTaskGetStackHighWaterMark(usb_read_task_handle_);
-      if (stack_hwm < 512)
-        ESP_LOGW(TAG, "ups_usb_read stack low: %u bytes free", stack_hwm);
-    }
-
-    uint32_t leaked = 0;
-    if (!simulation_mode_ && transport_) {
-      auto *esp_transport = static_cast<Esp32UsbTransport *>(transport_.get());
-      leaked = esp_transport->get_leaked_transfer_count();
-    }
-
-    uint32_t heap_free = esp_get_free_heap_size();
-    uint32_t heap_min = esp_get_minimum_free_heap_size();
-
-    nvs_handle_t h;
-    if (nvs_open("ups_diag", NVS_READWRITE, &h) == ESP_OK) {
-      nvs_set_u32(h, "stack_hwm", stack_hwm);
-      nvs_set_u32(h, "heap_free", heap_free);
-      nvs_set_u32(h, "heap_min", heap_min);
-      nvs_set_u32(h, "leaked", leaked);
-      nvs_set_u32(h, "uptime_s", now / 1000);
-      nvs_commit(h);
-      nvs_close(h);
-    }
-  }
-#endif
 }
 
+void UpsHidComponent::request_transport_recovery(const char *reason) {
+  if (!transport_) return;
+  last_recovery_request_ms_.store(millis());
+  recovery_attempts_++;
+  ESP_LOGW(TAG, "Requesting USB recovery #%u: %s", recovery_attempts_.load(), reason);
+  event_log_.record(format_event_timestamp(), std::string("USB recovery: ") + reason);
+  transport_->request_recovery(reason);
+}
+
+// Runs on the main loop. Never touches the protocol or transport state
+// directly; it only asks the transport for a recovery or, as a last resort,
+// reboots.
 void UpsHidComponent::check_task_health() {
   if (!usb_task_running_.load()) return;
 
   uint32_t now = millis();
   uint32_t hb = usb_task_heartbeat_.load();
 
-  // Check 1: task heartbeat stale (task is blocked in a USB/FreeRTOS call)
-  bool task_hung = (hb != 0) && (now - hb > 60000);
-
-  // Check 2: task is alive (heartbeat fresh) but data stopped flowing.
-  // Covers: looping in "waiting for device", endless detection failures, etc.
-  bool data_stale = !task_hung && (last_successful_read_ > 0) &&
-                    (now - last_successful_read_) > DATA_STALE_TIMEOUT_MS;
-
-  if (!task_hung && !data_stale) return;
-
-  if (task_hung) {
-    ESP_LOGE(TAG, "USB read task heartbeat stale (%ums) - task is hung or dead",
-             now - hb);
-  } else {
-    ESP_LOGE(TAG, "No successful data read for %us - transport may need recovery",
-             (now - last_successful_read_) / 1000);
-  }
-
-  // If this is the 3rd consecutive recovery attempt without any successful
-  // read, the USB stack is unrecoverable. Reboot the ESP.
-  recovery_attempts_++;
-  if (recovery_attempts_ >= 3) {
-    ESP_LOGE(TAG, "USB recovery failed %u times, rebooting ESP", recovery_attempts_.load());
-    delay(100);  // Let the log message flush
-    App.safe_reboot();
+  // The read task refreshes its heartbeat before every USB transfer, so a
+  // stale heartbeat means it is blocked inside one (device not answering).
+  if (hb != 0 && now - hb > TASK_HUNG_MS) {
+    if (now - hb > TASK_HUNG_REBOOT_MS) {
+      ESP_LOGE(TAG, "USB read task hung for %us despite recovery attempts, rebooting ESP", (now - hb) / 1000);
+      delay(100);
+      App.safe_reboot();
+      return;
+    }
+    if (now - last_recovery_request_ms_.load() > RECOVERY_MIN_INTERVAL_MS) {
+      ESP_LOGE(TAG, "USB read task heartbeat stale (%us)", (now - hb) / 1000);
+      request_transport_recovery("usb read task hung");
+    }
     return;
   }
 
-  usb_task_generation_.fetch_add(1);
-  usb_task_heartbeat_.store(0);
-  consecutive_failures_ = 0;
-  last_successful_read_ = now;  // give the new task 60s before we check again
-
-  transport_needs_reinit_.store(true);
-
-  xTaskCreate(usb_read_task, "ups_usb_read", 8192, this, 1, &usb_read_task_handle_);
-  ESP_LOGI(TAG, "Recovery attempt %u: new USB read task spawned", recovery_attempts_.load());
+  // The task is alive but data stopped flowing. The read loop escalates on
+  // its own (protocol reset, detection retries, transport recovery); reboot
+  // only if that has been going on for a long time without success while a
+  // device is still attached.
+  uint32_t last_ok = last_successful_read_.load();
+  if (last_ok != 0 && transport_ && transport_->is_connected() &&
+      recovery_attempts_.load() >= MAX_RECOVERIES_BEFORE_REBOOT &&
+      now - last_ok > REBOOT_AFTER_STALE_MS) {
+    ESP_LOGE(TAG, "No UPS data for %us after %u USB recoveries, rebooting ESP",
+             (now - last_ok) / 1000, recovery_attempts_.load());
+    delay(100);
+    App.safe_reboot();
+  }
 }
+
+#ifdef USE_ESP32
+void UpsHidComponent::nvs_task(void *param) {
+  static_cast<UpsHidComponent *>(param)->nvs_loop();
+  vTaskDelete(nullptr);
+}
+
+void UpsHidComponent::nvs_loop() {
+  uint32_t last_diag_ms = 0;
+  while (nvs_task_running_.load()) {
+    event_log_.flush_nvs_if_dirty();
+
+    uint32_t now = millis();
+    if (now - last_diag_ms > 60000) {
+      last_diag_ms = now;
+      write_diagnostics_to_nvs();
+    }
+    vTaskDelay(pdMS_TO_TICKS(5000));
+  }
+}
+
+void UpsHidComponent::write_diagnostics_to_nvs() {
+  uint32_t stack_hwm = 0;
+  if (usb_read_task_handle_) {
+    stack_hwm = uxTaskGetStackHighWaterMark(usb_read_task_handle_);
+    if (stack_hwm < 512)
+      ESP_LOGW(TAG, "ups_usb_read stack low: %u bytes free", stack_hwm);
+  }
+
+  uint32_t stalls = transport_ ? transport_->get_stall_count() : 0;
+  uint32_t recoveries = transport_ ? transport_->get_recovery_count() : 0;
+
+  nvs_handle_t h;
+  if (nvs_open("ups_diag", NVS_READWRITE, &h) == ESP_OK) {
+    nvs_set_u32(h, "stack_hwm", stack_hwm);
+    nvs_set_u32(h, "heap_free", esp_get_free_heap_size());
+    nvs_set_u32(h, "heap_min", esp_get_minimum_free_heap_size());
+    nvs_set_u32(h, "stalls", stalls);
+    nvs_set_u32(h, "recoveries", recoveries);
+    nvs_set_u32(h, "uptime_s", millis() / 1000);
+    nvs_commit(h);
+    nvs_close(h);
+  }
+}
+#endif
 
 void UpsHidComponent::queue_command(CmdType type, int param) {
   std::lock_guard<std::mutex> lock(command_mutex_);
@@ -221,6 +249,8 @@ void UpsHidComponent::process_pending_commands() {
     }
     ESP_LOGI(TAG, "Command %d executed: %s", static_cast<int>(cmd.type), ok ? "OK" : "FAILED");
   }
+  // Settings (beeper, delays) may have changed; make sure the next read refreshes them.
+  active_protocol_->request_full_refresh();
 }
 
 void UpsHidComponent::read_and_update_timers() {
@@ -232,26 +262,30 @@ void UpsHidComponent::read_and_update_timers() {
     timer_data = ups_data_;
   }
 
-  if (!active_protocol_->read_timer_data(timer_data)) return;
+  // Protocols that read timers as part of the regular cycle return false here;
+  // the fast-poll decision below uses the merged data either way.
+  bool have_new = active_protocol_->read_timer_data(timer_data);
 
   bool changed = false;
+  bool timers_active;
   {
     std::lock_guard<std::mutex> lock(data_mutex_);
-    if (ups_data_.test.timer_shutdown != timer_data.test.timer_shutdown ||
-        ups_data_.test.timer_start != timer_data.test.timer_start ||
-        ups_data_.test.timer_reboot != timer_data.test.timer_reboot) {
+    if (have_new &&
+        (ups_data_.test.timer_shutdown != timer_data.test.timer_shutdown ||
+         ups_data_.test.timer_start != timer_data.test.timer_start ||
+         ups_data_.test.timer_reboot != timer_data.test.timer_reboot)) {
       ups_data_.test.timer_shutdown = timer_data.test.timer_shutdown;
       ups_data_.test.timer_start = timer_data.test.timer_start;
       ups_data_.test.timer_reboot = timer_data.test.timer_reboot;
       changed = true;
     }
+    timers_active = ups_data_.test.timer_shutdown > 0 ||
+                    ups_data_.test.timer_start > 0 ||
+                    ups_data_.test.timer_reboot > 0;
   }
 
   if (changed) new_data_available_.store(true);
 
-  bool timers_active = (timer_data.test.timer_shutdown > 0 ||
-                        timer_data.test.timer_start > 0 ||
-                        timer_data.test.timer_reboot > 0);
   if (timers_active != fast_polling_mode_) {
     fast_polling_mode_ = timers_active;
     ESP_LOGI(TAG, "Timer polling: %s", timers_active ? "fast (2s)" : "normal");
@@ -260,90 +294,48 @@ void UpsHidComponent::read_and_update_timers() {
 
 void UpsHidComponent::usb_read_task(void *param) {
   auto *self = static_cast<UpsHidComponent *>(param);
+  self->usb_task_active_ = true;
   self->usb_read_loop();
   self->usb_task_active_ = false;
   vTaskDelete(nullptr);
 }
 
-void UpsHidComponent::usb_read_loop() {
-  const uint32_t my_generation = usb_task_generation_.load();
+void UpsHidComponent::usb_task_sleep(uint32_t ms) {
+  bool connected = transport_ && transport_->is_connected();
+  uint32_t start = millis();
+  while (usb_task_running_.load() && millis() - start < ms) {
+    usb_task_heartbeat_.store(millis());
+    vTaskDelay(pdMS_TO_TICKS(std::min<uint32_t>(500, ms)));
+    if ((transport_ && transport_->is_connected()) != connected) break;
+  }
+}
 
+void UpsHidComponent::usb_read_loop() {
   usb_task_heartbeat_.store(millis());
 
-  // If flagged by check_task_health(), reinitialize transport before starting.
-  // We MUST wait for the old task to finish using active_protocol_ / transport_
-  // to avoid a use-after-free.
-  if (transport_needs_reinit_.exchange(false)) {
-    ESP_LOGW(TAG, "Waiting for previous task to release shared resources...");
-    for (int i = 0; i < 100 && usb_task_active_.load(); i++) {
-      usb_task_heartbeat_.store(millis());
-      vTaskDelay(pdMS_TO_TICKS(100));
-    }
-    if (usb_task_active_.load()) {
-      ESP_LOGE(TAG, "Old task did not exit after 10s - proceeding with reinit anyway");
-    }
-
-    ESP_LOGW(TAG, "Reinitializing USB transport (recovery from hung task)");
-    active_protocol_.reset();
-    { std::lock_guard<std::mutex> lock(data_mutex_); cached_protocol_name_ = protocol::NONE; }
-    report_map_.reset();
-    if (transport_) {
-      transport_->deinitialize();
-      vTaskDelay(pdMS_TO_TICKS(1000));
-      esp_err_t ret = transport_->initialize();
-      if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Transport reinitialization failed: %s",
-                 transport_->get_last_error().c_str());
-      } else {
-        ESP_LOGI(TAG, "Transport reinitialized successfully");
-      }
-    }
-  }
-
-  usb_task_active_ = true;
-
   while (usb_task_running_.load()) {
-    if (usb_task_generation_.load() != my_generation) {
-      ESP_LOGI(TAG, "USB read task (gen %u) superseded by gen %u, exiting",
-               my_generation, usb_task_generation_.load());
-      return;  // usb_task_active_ cleared by usb_read_task() after we return
-    }
-
     uint32_t now = millis();
     usb_task_heartbeat_.store(now);
     uint32_t interval = get_update_interval();
 
     if (!transport_ || !transport_->is_connected()) {
-      // If we had an active protocol, the transport just broke (e.g. HCD pipe
-      // went INVALID_STATE).  Tear down and rebuild immediately instead of
-      // waiting for the 60s stale-data timer.
+      // The device went away (unplugged, or a recovery power-cycled the port).
+      // Drop the protocol and wait for re-enumeration; the transport reconnects
+      // on its own.
       if (active_protocol_) {
-        ESP_LOGW(TAG, "Transport disconnected while protocol was active - reinitializing");
+        ESP_LOGW(TAG, "USB device disconnected%s - waiting for it to come back",
+                 transport_->is_recovering() ? " (recovery in progress)" : "");
         active_protocol_.reset();
         { std::lock_guard<std::mutex> lock(data_mutex_); cached_protocol_name_ = protocol::NONE; }
         report_map_.reset();
         consecutive_failures_ = 0;
-        if (transport_) {
-          transport_->deinitialize();
-          vTaskDelay(pdMS_TO_TICKS(1000));
-          esp_err_t ret = transport_->initialize();
-          if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Transport reinitialization failed: %s",
-                     transport_->get_last_error().c_str());
-          } else {
-            ESP_LOGI(TAG, "Transport reinitialized after pipe failure");
-          }
-        }
-        continue;
       }
 
       if (now - last_waiting_log_ > 30000) {
-        ESP_LOGW(TAG, "Waiting for USB device (transport %s, connected: %s)",
-                 transport_ ? "present" : "null",
-                 transport_ ? (transport_->is_connected() ? "yes" : "no") : "n/a");
+        ESP_LOGW(TAG, "Waiting for USB device (transport %s)", transport_ ? "not connected" : "null");
         last_waiting_log_ = now;
       }
-      vTaskDelay(pdMS_TO_TICKS(interval));
+      vTaskDelay(pdMS_TO_TICKS(500));
       continue;
     }
 
@@ -357,44 +349,35 @@ void UpsHidComponent::usb_read_loop() {
         consecutive_failures_++;
         ESP_LOGW(TAG, log_messages::DETECTION_FAILED, consecutive_failures_.load());
 
-        static constexpr uint32_t TRANSPORT_RESET_THRESHOLD = 3;
-        if (consecutive_failures_ > 0 &&
-            consecutive_failures_ % TRANSPORT_RESET_THRESHOLD == 0) {
-          ESP_LOGW(TAG, "Reinitializing USB transport after %u detection failures",
-                   consecutive_failures_.load());
-          if (transport_) {
-            transport_->deinitialize();
-            vTaskDelay(pdMS_TO_TICKS(1000));
-            esp_err_t ret = transport_->initialize();
-            if (ret != ESP_OK) {
-              ESP_LOGE(TAG, "Transport reinitialization failed: %s",
-                       transport_->get_last_error().c_str());
-            } else {
-              ESP_LOGI(TAG, "Transport reinitialized, retrying detection");
-            }
+        if (consecutive_failures_ % DETECTION_FAILURES_PER_RECOVERY == 0) {
+          // A device that used to work has stopped answering: power-cycle the
+          // port. A device that never worked may simply be unsupported, so only
+          // try that a few times before backing off to slow retries.
+          if (has_ever_read_data() || recovery_attempts_.load() < MAX_RECOVERIES_BEFORE_REBOOT) {
+            request_transport_recovery("protocol detection failed");
+            usb_task_sleep(2000);
+          } else {
+            ESP_LOGW(TAG, "Device not recognised after %u recoveries; retrying detection every 60s",
+                     recovery_attempts_.load());
+            usb_task_sleep(60000);
           }
-          continue;
+        } else {
+          usb_task_sleep(5000);
         }
-
-        // Brief backoff between detection retries (5s constant — no exponential
-        // growth since we reinit the transport after TRANSPORT_RESET_THRESHOLD).
-        vTaskDelay(pdMS_TO_TICKS(5000));
         continue;
       }
     }
 
-    // Process any commands queued by the main loop (beeper, test, delay, etc.)
+    // Commands queued by the main loop (beeper, test, delay, etc.)
     process_pending_commands();
 
-    // Read data (this is the slow USB I/O part -- can take seconds if reports
-    // are timing out).  Update heartbeat before and after so check_task_health()
-    // doesn't think we're dead during a long read cycle.
     usb_task_heartbeat_.store(millis());
     if (read_ups_data()) {
       new_data_available_.store(true);
       consecutive_failures_ = 0;
       last_successful_read_ = millis();
       recovery_attempts_ = 0;
+      stale_data_cleared_ = false;
     } else {
       consecutive_failures_++;
       ESP_LOGW(TAG, log_messages::READ_FAILED, consecutive_failures_.load());
@@ -406,7 +389,7 @@ void UpsHidComponent::usb_read_loop() {
         consecutive_failures_ = 0;
       }
 
-      if (last_successful_read_ > 0 &&
+      if (!stale_data_cleared_ && has_ever_read_data() &&
           (millis() - last_successful_read_) > DATA_STALE_TIMEOUT_MS) {
         ESP_LOGW(TAG, "No successful read for %us, clearing stale data",
                  DATA_STALE_TIMEOUT_MS / 1000);
@@ -414,19 +397,14 @@ void UpsHidComponent::usb_read_loop() {
         DeviceInfo saved_device = ups_data_.device;
         ups_data_.reset();
         ups_data_.device = saved_device;
-        last_successful_read_ = 0;
+        stale_data_cleared_ = true;
         new_data_available_.store(true);
       }
     }
 
-    // Read timers (runs on this background task, never on main loop)
     read_and_update_timers();
 
-    // Flush any pending NVS writes (deferred from main loop's record() calls)
-    event_log_.flush_nvs_if_dirty();
-
-    uint32_t delay_ms = fast_polling_mode_ ? FAST_POLL_INTERVAL_MS : interval;
-    vTaskDelay(pdMS_TO_TICKS(delay_ms));
+    usb_task_sleep(fast_polling_mode_ ? FAST_POLL_INTERVAL_MS : interval);
   }
 }
 
@@ -790,23 +768,23 @@ void UpsHidComponent::update_sensors() {
     bool state = false;
 
     if (type == binary_sensor_type::ONLINE) {
-      state = ups_data_.power.status == status::ONLINE ||
-              ups_data_.power.status == "Online (Boost)" ||
-              ups_data_.power.status == "Online (Trim)";
+      state = ups_data_.is_online();
     } else if (type == binary_sensor_type::ON_BATTERY) {
-      state = ups_data_.power.status == status::ON_BATTERY;
+      state = ups_data_.is_on_battery();
     } else if (type == binary_sensor_type::LOW_BATTERY) {
-      state = ups_data_.battery.is_low();
+      state = ups_data_.is_low_battery();
+    } else if (type == binary_sensor_type::FAULT) {
+      state = ups_data_.has_fault();
     } else if (type == binary_sensor_type::OVERLOAD) {
-      state = ups_data_.power.is_overloaded() || ups_data_.power.status == "Overload";
+      state = ups_data_.power.is_overloaded();
     } else if (type == binary_sensor_type::BOOST) {
       state = ups_data_.power.boost_active;
     } else if (type == binary_sensor_type::BUCK) {
       state = ups_data_.power.buck_active;
     } else if (type == binary_sensor_type::CHARGING) {
-      state = ups_data_.battery.status == battery_status::CHARGING;
+      state = ups_data_.is_charging();
     } else if (type == binary_sensor_type::DISCHARGING) {
-      state = ups_data_.battery.status == battery_status::DISCHARGING;
+      state = ups_data_.is_discharging();
     } else if (type == binary_sensor_type::FULLY_DISCHARGED) {
       state = ups_data_.battery.status == "Depleted";
     } else if (type == binary_sensor_type::OVER_TEMPERATURE) {
@@ -978,6 +956,9 @@ void UpsHidComponent::log_suppressed_errors(ErrorRateLimit& limiter) {
 }
 
 void UpsHidComponent::cleanup() {
+  nvs_task_running_.store(false);
+  nvs_task_handle_ = nullptr;
+
   if (usb_task_running_.load()) {
     usb_task_running_.store(false);
     // Wait for the background task to finish any in-flight USB I/O and exit.
@@ -1036,30 +1017,20 @@ void UpsHidComponent::check_state_changes() {
   StateSnapshot current;
   {
     std::lock_guard<std::mutex> lock(data_mutex_);
-    const auto& s = ups_data_.power.status;
-    if (s == status::ON_BATTERY) {
-      current.online = false;
-      current.on_battery = true;
-    } else if (!s.empty() && s != status::UNKNOWN) {
-      current.online = true;
-      current.on_battery = false;
-    } else {
-      current.online = ups_data_.power.input_voltage_valid();
-      current.on_battery = !current.online;
-    }
-    current.low_battery = ups_data_.battery.is_low();
-    current.charging = current.online &&
-                       ups_data_.battery.is_valid() &&
-                       !std::isnan(ups_data_.battery.level) &&
-                       ups_data_.battery.level < 100.0f;
+    current.online = ups_data_.is_online();
+    current.on_battery = ups_data_.is_on_battery();
+    current.low_battery = ups_data_.is_low_battery();
+    current.charging = ups_data_.is_charging();
     current.overloaded = ups_data_.power.is_overloaded();
-    current.fault = ups_data_.power.is_input_out_of_range() ||
-                    (!ups_data_.power.is_valid() && !ups_data_.battery.is_valid());
+    current.fault = ups_data_.has_fault();
 
     float level = ups_data_.battery.is_valid() ? ups_data_.battery.level : NAN;
     current.battery_level_bucket = std::isnan(level) ? -1 : static_cast<int>(level) / 5;
-    current.valid = true;
+    current.valid = current.online || current.on_battery;
   }
+
+  // Nothing to record until the power state is known.
+  if (!current.valid) return;
 
   std::string ts = format_event_timestamp();
 
@@ -1105,42 +1076,39 @@ void UpsHidComponent::check_state_changes() {
 }
 
 // Convenient state getters for lambda expressions (no sensor entities required).
-// These use the protocol-reported status string as primary indicator, falling
-// back to voltage checks only when status is unknown or not yet determined.
 bool UpsHidComponent::is_online() const {
   std::lock_guard<std::mutex> lock(data_mutex_);
-  const auto& s = ups_data_.power.status;
-  if (s == status::ON_BATTERY) return false;
-  if (!s.empty() && s != status::UNKNOWN) return true;
-  return ups_data_.power.input_voltage_valid();
+  return ups_data_.is_online();
 }
 
 bool UpsHidComponent::is_on_battery() const {
   std::lock_guard<std::mutex> lock(data_mutex_);
-  return ups_data_.power.status == status::ON_BATTERY;
+  return ups_data_.is_on_battery();
 }
 
 bool UpsHidComponent::is_low_battery() const {
   std::lock_guard<std::mutex> lock(data_mutex_);
-  return ups_data_.battery.is_low();
+  return ups_data_.is_low_battery();
 }
 
 bool UpsHidComponent::is_charging() const {
   std::lock_guard<std::mutex> lock(data_mutex_);
-  if (ups_data_.power.status == status::ON_BATTERY) return false;
-  return ups_data_.battery.is_valid() &&
-         !std::isnan(ups_data_.battery.level) &&
-         ups_data_.battery.level < 100.0f;
+  return ups_data_.is_charging();
 }
 
 bool UpsHidComponent::has_fault() const {
   std::lock_guard<std::mutex> lock(data_mutex_);
-  return ups_data_.power.is_input_out_of_range() ||
-         (!ups_data_.power.is_valid() && !ups_data_.battery.is_valid());
+  return ups_data_.has_fault();
 }
 
 uint32_t UpsHidComponent::get_data_age_ms() const {
-  return last_successful_read_ > 0 ? millis() - last_successful_read_ : 0;
+  uint32_t last = last_successful_read_.load();
+  return last != 0 ? millis() - last : UINT32_MAX;
+}
+
+bool UpsHidComponent::is_protocol_active() const {
+  std::lock_guard<std::mutex> lock(data_mutex_);
+  return cached_protocol_name_ != protocol::NONE;
 }
 
 bool UpsHidComponent::is_overloaded() const {

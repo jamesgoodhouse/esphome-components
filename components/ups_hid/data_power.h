@@ -2,6 +2,7 @@
 
 #include <string>
 #include <cmath>
+#include <cstdint>
 #include "constants_hid.h"
 
 namespace esphome {
@@ -32,8 +33,11 @@ struct PowerData {
 
   // Power status information
   std::string status{};                // Power status text (Online, On Battery, etc.)
+  int8_t ac_present{-1};               // Device ACPresent flag: 1 = mains present, 0 = absent, -1 = not reported
 
-  // AVR / power conditioning flags
+  // Status flags (as reported by the device)
+  bool overload{false};                // Output overload
+  bool internal_failure{false};        // UPS internal fault
   bool boost_active{false};            // AVR boost mode active
   bool buck_active{false};             // AVR buck mode active
   bool over_temperature{false};        // Over temperature alarm
@@ -68,7 +72,7 @@ struct PowerData {
   }
 
   bool is_overloaded() const {
-    return !std::isnan(load_percent) && load_percent > 95.0f;
+    return overload || (!std::isnan(load_percent) && load_percent > 95.0f);
   }
 
   bool has_load_info() const {
@@ -103,6 +107,9 @@ struct PowerData {
     // for a few cycles to ride out transient glitches.
     if (!other.status.empty() && other.status != "Unknown") {
       status = other.status;
+      ac_present = other.ac_present;
+      overload = other.overload;
+      internal_failure = other.internal_failure;
       boost_active = other.boost_active;
       buck_active = other.buck_active;
       over_temperature = other.over_temperature;
@@ -115,6 +122,9 @@ struct PowerData {
       status_stale_cycles++;
       if (status_stale_cycles >= MAX_STALE_CYCLES) {
         status.clear();
+        ac_present = -1;
+        overload = false;
+        internal_failure = false;
         boost_active = false;
         buck_active = false;
         over_temperature = false;

@@ -48,6 +48,15 @@ public:
 
     // Error information
     virtual std::string get_last_error() const = 0;
+
+    // Recovery: ask the transport to reset the bus/device (e.g. root-port
+    // power cycle). Safe to call from any task; the work happens on the
+    // transport's own task. is_connected() goes false while it runs.
+    virtual void request_recovery(const char* reason) {}
+    virtual bool is_recovering() const { return false; }
+    virtual uint32_t get_recovery_count() const { return 0; }
+    // Number of control transfers that got no response from the device.
+    virtual uint32_t get_stall_count() const { return 0; }
 };
 
 // Forward declaration - implementation in usb_transport_factory.h

@@ -28,14 +28,19 @@ struct BatteryData {
   std::string type{};                  // Battery chemistry type
   std::string mfr_date{};              // Battery manufacture date
   bool needs_replacement{false};       // Battery replacement needed flag
+  bool low_battery{false};             // Device-reported low battery (BelowRemainingCapacityLimit / time limit expired)
+  bool flags_valid{false};             // needs_replacement/low_battery were read this cycle
 
   // Validation and utility methods
   bool is_valid() const {
     return !std::isnan(level) || !std::isnan(voltage) || !std::isnan(runtime_minutes);
   }
 
+  // Low battery: the device's own judgement, or our thresholds when known.
   bool is_low() const {
-    return !std::isnan(level) && !std::isnan(charge_low) && level <= charge_low;
+    if (low_battery) return true;
+    if (!std::isnan(level) && !std::isnan(charge_low) && level <= charge_low) return true;
+    return !std::isnan(runtime_minutes) && !std::isnan(runtime_low) && runtime_minutes <= runtime_low;
   }
 
   bool is_warning() const {
@@ -61,7 +66,13 @@ struct BatteryData {
     if (!other.status.empty()) status = other.status;
     if (!other.type.empty()) type = other.type;
     if (!other.mfr_date.empty()) mfr_date = other.mfr_date;
-    if (other.is_valid()) needs_replacement = other.needs_replacement;
+    if (other.flags_valid) {
+      low_battery = other.low_battery;
+      needs_replacement = other.needs_replacement;
+      flags_valid = true;
+    } else if (other.is_valid()) {
+      needs_replacement = other.needs_replacement;
+    }
   }
 
   void reset() {
