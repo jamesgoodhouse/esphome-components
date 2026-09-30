@@ -520,9 +520,12 @@ void GenericHidProtocol::parse_battery_status(uint8_t *data, size_t len, UpsData
         ups_data.battery.status = battery_status::FULLY_CHARGED;
       }
 
+      ups_data.battery.flags_valid = true;
+      ups_data.battery.low_battery = (status & 0x04) != 0;
+      ups_data.battery.needs_replacement = (status & 0x10) != 0;
+
       if (status & 0x04)
       {
-        ups_data.battery.charge_low = battery::LOW_THRESHOLD_PERCENT; // Low battery threshold
         // Also update status to indicate low battery condition
         if (ups_data.battery.status.empty())
         {
@@ -597,9 +600,12 @@ void GenericHidProtocol::parse_present_status(uint8_t *data, size_t len, UpsData
       ups_data.power.input_voltage = parent_->get_fallback_nominal_voltage(); // Use configured fallback voltage
     }
 
+    ups_data.battery.flags_valid = true;
+    ups_data.battery.low_battery = (status & 0x08) != 0;
+    ups_data.battery.needs_replacement = (status & 0x10) != 0;
+
     if (status & 0x08)
     {
-      ups_data.battery.charge_low = battery::LOW_THRESHOLD_PERCENT; // Low battery threshold
       // Also update status to indicate low battery condition
       if (ups_data.battery.status.empty())
       {

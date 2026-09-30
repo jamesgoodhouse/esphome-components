@@ -829,6 +829,11 @@ void Esp32UsbTransport::process_device_gone_locked() {
 // the device gone (which cancels any in-flight EP0 transfer), the client then
 // closes the device, the stack recovers the port, and powering it back on
 // re-enumerates the device with a fresh bus reset.
+//
+// Runs on the lib task right after usb_host_lib_handle_events(): the hub
+// driver asserts that the power-off command succeeds, and HCD rejects port
+// commands while a root-port event is still pending, so it must be issued
+// immediately after those events have been serviced.
 void Esp32UsbTransport::process_port_reset() {
 #if !UPS_HID_HAVE_ROOT_PORT_POWER
     if (recovery_requested_.exchange(false)) {
@@ -965,6 +970,10 @@ void Esp32UsbTransport::usb_lib_task(void* arg) {
             ESP_LOGE(ESP32_USB_TAG, "USB Host event handling failed: %s", esp_err_to_name(ret));
         }
 
+        if (transport->usb_tasks_running_.load()) {
+            transport->process_port_reset();
+        }
+
         if (!transport->usb_tasks_running_.load()) {
             if (shutdown_requested_ms == 0) {
                 shutdown_requested_ms = millis();
@@ -1028,8 +1037,6 @@ void Esp32UsbTransport::usb_client_task(void* arg) {
             std::lock_guard<std::mutex> lock(transport->device_mutex_);
             transport->handle_new_device_locked(addr);
         }
-
-        transport->process_port_reset();
 
         vTaskDelay(pdMS_TO_TICKS(10));
     }

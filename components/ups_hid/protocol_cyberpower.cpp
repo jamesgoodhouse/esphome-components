@@ -379,12 +379,12 @@ void CyberPowerProtocol::parse_present_status_report(const HidReport &report, Up
     data.battery.status = battery_status::NORMAL;
   }
   
-  // Set low battery indicators
-  if (low_battery || time_limit_expired) {
-    data.battery.charge_low = battery::LOW_THRESHOLD_PERCENT;  // Indicate low battery threshold
-    if (time_limit_expired) {
-      data.battery.status += battery_status::TIME_LIMIT_EXPIRED_SUFFIX;
-    }
+  // Device-reported flags (NUT: LB from BelowRemainingCapacityLimit | TimeLimitExpired)
+  data.power.ac_present = ac_present ? 1 : 0;
+  data.battery.flags_valid = true;
+  data.battery.low_battery = low_battery || time_limit_expired;
+  if (time_limit_expired) {
+    data.battery.status += battery_status::TIME_LIMIT_EXPIRED_SUFFIX;
   }
   
   ESP_LOGD(CP_TAG, "Status: AC:%s Charging:%s OnBatt:%s LowBatt:%s BattStatus:\"%s\"", 
