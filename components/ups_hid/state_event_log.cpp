@@ -15,6 +15,8 @@ void StateEventLog::record(const std::string &timestamp, const std::string &mess
   bool should_persist = message.find("Status:") != std::string::npos ||
                         message.find("Initial state:") != std::string::npos ||
                         message.find("Boot:") != std::string::npos ||
+                        message.find("Reboot:") != std::string::npos ||
+                        message.find("Panic:") != std::string::npos ||
                         message.find("USB recovery:") != std::string::npos;
   {
     std::lock_guard<std::mutex> lock(mutex_);

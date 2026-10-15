@@ -21,6 +21,11 @@
 #include "esp_system.h"
 #include "nvs_flash.h"
 #include "nvs.h"
+#include "sdkconfig.h"
+#if defined(CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH) && __has_include("esp_core_dump.h")
+#include "esp_core_dump.h"
+#define UPS_HID_HAVE_COREDUMP 1
+#endif
 #endif
 
 namespace esphome {
@@ -61,18 +66,22 @@ void UpsHidComponent::setup() {
     nvs_handle_t h;
     if (nvs_open("ups_diag", NVS_READONLY, &h) == ESP_OK) {
       uint32_t stack_hwm = 0, heap_free = 0, heap_min = 0, stalls = 0, recoveries = 0, uptime_s = 0;
+      uint8_t ups_state = 0xFF;
       nvs_get_u32(h, "stack_hwm", &stack_hwm);
       nvs_get_u32(h, "heap_free", &heap_free);
       nvs_get_u32(h, "heap_min", &heap_min);
       nvs_get_u32(h, "stalls", &stalls);
       nvs_get_u32(h, "recoveries", &recoveries);
       nvs_get_u32(h, "uptime_s", &uptime_s);
+      nvs_get_u8(h, "ups_state", &ups_state);
       nvs_close(h);
 
+      const char *ups_desc = ups_state == 2 ? "answering" : ups_state == 1 ? "attached-silent" :
+                             ups_state == 0 ? "absent" : "unknown";
       ESP_LOGI(TAG, "Pre-crash diagnostics (from %" PRIu32 "s uptime): "
                "usb_read stack=%" PRIu32 ", heap free=%" PRIu32 ", heap min=%" PRIu32
-               ", usb stalls=%" PRIu32 ", usb recoveries=%" PRIu32,
-               uptime_s, stack_hwm, heap_free, heap_min, stalls, recoveries);
+               ", usb stalls=%" PRIu32 ", usb recoveries=%" PRIu32 ", ups %s",
+               uptime_s, stack_hwm, heap_free, heap_min, stalls, recoveries, ups_desc);
 
       std::string boot_msg = std::string("Boot: reset=") + reason +
           " | pre-crash: stack=" + std::to_string(stack_hwm) +
@@ -80,6 +89,7 @@ void UpsHidComponent::setup() {
           " heap_min=" + std::to_string(heap_min) +
           " stalls=" + std::to_string(stalls) +
           " recoveries=" + std::to_string(recoveries) +
+          " ups=" + ups_desc +
           " uptime=" + std::to_string(uptime_s) + "s";
       event_log_.record(format_event_timestamp(), boot_msg);
     } else {
@@ -87,6 +97,7 @@ void UpsHidComponent::setup() {
       event_log_.record(format_event_timestamp(), boot_msg);
     }
   }
+  record_core_dump_summary();
 #endif
 
   if (!initialize_transport()) {
@@ -165,15 +176,18 @@ void UpsHidComponent::check_task_health() {
     return;
   }
 
-  // The task is alive but data stopped flowing. The read loop escalates on
-  // its own (protocol reset, detection retries, transport recovery); reboot
-  // only if that has been going on for a long time without success while a
-  // device is still attached.
-  uint32_t last_ok = last_successful_read_.load();
-  if (last_ok != 0 && transport_ && transport_->is_connected() &&
-      recovery_attempts_.load() >= MAX_RECOVERIES_BEFORE_REBOOT &&
-      now - last_ok > REBOOT_AFTER_STALE_MS) {
-    reboot("No UPS data for 5 minutes despite repeated USB recoveries");
+  // A UPS that stops answering is the UPS's problem: like a NUT driver we
+  // serve stale data and keep retrying, a reboot cannot fix it. Reboot only
+  // when the host stack itself is wedged: a port power-cycle that cannot be
+  // completed (the port could not be re-powered) for a sustained period.
+  if (transport_ && transport_->is_recovery_stuck()) {
+    if (port_stuck_since_ms_ == 0) {
+      port_stuck_since_ms_ = now;
+    } else if (now - port_stuck_since_ms_ > PORT_STUCK_REBOOT_MS) {
+      reboot("USB root port could not be re-powered for 2 minutes");
+    }
+  } else {
+    port_stuck_since_ms_ = 0;
   }
 }
 
@@ -208,6 +222,12 @@ void UpsHidComponent::write_diagnostics_to_nvs() {
   uint32_t stalls = transport_ ? transport_->get_stall_count() : 0;
   uint32_t recoveries = transport_ ? transport_->get_recovery_count() : 0;
 
+  // Whether a UPS was attached and answering when the diagnostics were last
+  // written tells a post-mortem whether the device or the ESP was at fault.
+  uint32_t age_ms = get_data_age_ms();
+  uint8_t state = (transport_ && transport_->is_connected()) ? 1 : 0;
+  if (state && age_ms < 60000) state = 2;
+
   nvs_handle_t h;
   if (nvs_open("ups_diag", NVS_READWRITE, &h) == ESP_OK) {
     nvs_set_u32(h, "stack_hwm", stack_hwm);
@@ -216,9 +236,37 @@ void UpsHidComponent::write_diagnostics_to_nvs() {
     nvs_set_u32(h, "stalls", stalls);
     nvs_set_u32(h, "recoveries", recoveries);
     nvs_set_u32(h, "uptime_s", millis() / 1000);
+    nvs_set_u8(h, "ups_state", state);
     nvs_commit(h);
     nvs_close(h);
   }
+}
+
+// With CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH (and a coredump partition) the
+// panic handler saves a core dump; summarise it here so the crashing task, PC
+// and backtrace are available without a serial console. Decode the addresses
+// with: xtensa-esp32s3-elf-addr2line -pfiaC -e firmware.elf <addresses>
+void UpsHidComponent::record_core_dump_summary() {
+#ifdef UPS_HID_HAVE_COREDUMP
+  if (esp_core_dump_image_check() != ESP_OK) return;
+
+  esp_core_dump_summary_t summary{};
+  if (esp_core_dump_get_summary(&summary) == ESP_OK) {
+    char buf[220];
+    int n = snprintf(buf, sizeof(buf), "Panic: task=%.16s cause=%" PRIu32 " pc=0x%08" PRIx32 " bt=",
+                     summary.exc_task, summary.ex_info.exc_cause, summary.exc_pc);
+    uint32_t depth = std::min<uint32_t>(summary.exc_bt_info.depth, 10);
+    for (uint32_t i = 0; i < depth && n > 0 && static_cast<size_t>(n) < sizeof(buf) - 12; i++) {
+      n += snprintf(buf + n, sizeof(buf) - n, "%s0x%08" PRIx32, i ? " " : "", summary.exc_bt_info.bt[i]);
+    }
+    if (summary.exc_bt_info.corrupted && n > 0 && static_cast<size_t>(n) < sizeof(buf) - 12) {
+      snprintf(buf + n, sizeof(buf) - n, " (corrupt)");
+    }
+    ESP_LOGE(TAG, "Previous boot ended in a panic: %s", buf);
+    event_log_.record(format_event_timestamp(), buf);
+  }
+  esp_core_dump_image_erase();  // report each panic once
+#endif
 }
 #endif
 
@@ -316,6 +364,7 @@ void UpsHidComponent::usb_task_sleep(uint32_t ms) {
 
 void UpsHidComponent::usb_read_loop() {
   usb_task_heartbeat_.store(millis());
+  bool was_disconnected = true;
 
   while (usb_task_running_.load()) {
     uint32_t now = millis();
@@ -339,12 +388,20 @@ void UpsHidComponent::usb_read_loop() {
         ESP_LOGW(TAG, "Waiting for USB device (transport %s)", transport_ ? "not connected" : "null");
         last_waiting_log_ = now;
       }
+      was_disconnected = true;
       vTaskDelay(pdMS_TO_TICKS(500));
       continue;
     }
 
     // Protocol detection
     if (!active_protocol_) {
+      if (was_disconnected) {
+        // Give a freshly enumerated UPS a moment before talking to it; some
+        // ignore requests right after enumeration.
+        was_disconnected = false;
+        usb_task_sleep(CONNECT_SETTLE_MS);
+        continue;
+      }
       ESP_LOGI(TAG, log_messages::ATTEMPTING_DETECTION);
       if (detect_protocol()) {
         ESP_LOGI(TAG, log_messages::PROTOCOL_DETECTED);
@@ -354,14 +411,14 @@ void UpsHidComponent::usb_read_loop() {
         ESP_LOGW(TAG, log_messages::DETECTION_FAILED, static_cast<unsigned>(consecutive_failures_.load()));
 
         if (consecutive_failures_ % DETECTION_FAILURES_PER_RECOVERY == 0) {
-          // A device that used to work has stopped answering: power-cycle the
-          // port. A device that never worked may simply be unsupported, so only
-          // try that a few times before backing off to slow retries.
-          if (has_ever_read_data() || recovery_attempts_.load() < MAX_RECOVERIES_BEFORE_REBOOT) {
+          // A device that has stopped answering may be unstuck by a port
+          // power-cycle, but only a few are tried per outage: it may simply be
+          // unsupported, switched off or busy, and it comes back on its own.
+          if (can_request_recovery()) {
             request_transport_recovery("protocol detection failed");
             usb_task_sleep(2000);
           } else {
-            ESP_LOGW(TAG, "Device not recognised after %" PRIu32 " recoveries; retrying detection every 60s",
+            ESP_LOGW(TAG, "Device not answering after %" PRIu32 " recoveries; retrying detection every 60s",
                      recovery_attempts_.load());
             usb_task_sleep(60000);
           }
@@ -393,8 +450,7 @@ void UpsHidComponent::usb_read_loop() {
         consecutive_failures_ = 0;
         // Detection may keep succeeding on a device whose other reports have
         // stopped answering, so escalate to a port power-cycle here too.
-        if ((has_ever_read_data() || recovery_attempts_.load() < MAX_RECOVERIES_BEFORE_REBOOT) &&
-            millis() - last_recovery_request_ms_.load() > RECOVERY_MIN_INTERVAL_MS) {
+        if (can_request_recovery()) {
           request_transport_recovery("repeated read failures");
         }
       }

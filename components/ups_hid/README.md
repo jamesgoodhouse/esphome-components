@@ -99,7 +99,26 @@ The Tripp Lite protocol uses a dedicated HID report descriptor parser to automat
 
 ### USB Robustness
 
-ESP-IDF's USB Host stack has two properties this component is built around: control transfers never time out on the host side (`usb_transfer_t::timeout_ms` is not implemented), and a device may only be closed once no control transfer is in flight. The transport therefore never abandons a transfer. If the UPS stops answering, the component power-cycles the USB root port (`usb_host_lib_set_root_port_power`), which cancels the pending transfer, tears the device down cleanly and re-enumerates it with a fresh bus reset. Recovery is also triggered after repeated protocol detection failures. While it runs, NUT clients see `DATA-STALE`, and the event is recorded in the persistent event log (`ups.debug.event.N`). If three recoveries pass without a successful read, or the USB task stays blocked for 3 minutes, the ESP reboots as a last resort.
+ESP-IDF's USB Host stack has two properties this component is built around: control transfers never time out on the host side (`usb_transfer_t::timeout_ms` is not implemented), and a device may only be closed once no control transfer is in flight. The transport therefore never abandons a transfer. If the UPS does not answer a request for 5 seconds (NUT's USB timeout), the component power-cycles the USB root port (`usb_host_lib_set_root_port_power`), which cancels the pending transfer, tears the device down cleanly and re-enumerates it with a fresh bus reset. Recovery is also triggered after repeated protocol detection or read failures, at most three times per outage: like a NUT driver, a UPS that stays silent is reported as `DATA-STALE` and retried patiently, not power-cycled or rebooted endlessly. Every recovery is recorded in the persistent event log (`ups.debug.event.N`).
+
+The ESP reboots only when its own USB stack is wedged: the USB task stays blocked for 3 minutes despite a recovery, or the root port cannot be re-powered for 2 minutes. The reason is written to the event log (`Reboot: …`) before restarting, and the next boot records the reset reason plus the last diagnostics written before it (`Boot: reset=… | pre-crash: …`, including whether the UPS was answering at the time).
+
+#### Diagnosing panics without a serial console
+
+A crash (`reset=Exception/panic`) prints its backtrace only to the serial console. To capture it on a headless device, build with core dumps to flash; the component then logs and records a `Panic: task=… pc=… bt=…` event on the next boot:
+
+```yaml
+esp32:
+  partitions: partitions.csv        # must add a `coredump` partition, see below
+  framework:
+    type: esp-idf
+    sdkconfig_options:
+      CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH: y
+      CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF: y
+      CONFIG_ESP_COREDUMP_CHECKSUM_CRC32: y
+```
+
+Copy ESPHome's generated partition table (`.esphome/build/<name>/partitions.csv`) and append a `coredump, data, coredump, , 64K` row (shrink `nvs`/the last partition if needed; keep `app0`/`app1` offsets unchanged). Changing the partition table requires one flash over USB/serial — OTA does not rewrite it. Decode the addresses with `xtensa-esp32s3-elf-addr2line -pfiaC -e .esphome/build/<name>/.pioenvs/<name>/firmware.elf <addresses>`.
 
 ## Configuration Reference
 

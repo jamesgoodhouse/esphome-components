@@ -33,10 +33,13 @@ static const char *const ESP32_USB_TAG = "ups_hid.esp32_usb";
 #endif
 
 // Minimum time the root port stays unpowered during a recovery so the device
-// sees a real disconnect, and the longest we wait for the stack to close the
-// device / recover the port before giving up on a recovery cycle.
+// sees a real disconnect, and how long the stack normally needs to close the
+// device / recover the port before it can be re-powered; beyond that the
+// recovery is reported as stuck (re-powering is still retried).
 static constexpr uint32_t PORT_RESET_OFF_MS = 1000;
 static constexpr uint32_t PORT_RESET_MAX_MS = 15000;
+// No response to a control transfer for this long is treated as a stall.
+static constexpr uint32_t STALL_AFTER_MS = 5000;
 
 // Only referenced from debug-level logging, which may be compiled out.
 [[maybe_unused]] static const char *transfer_status_name(usb_transfer_status_t s) {
@@ -239,22 +242,24 @@ esp_err_t Esp32UsbTransport::control_transfer(uint8_t bmRequestType, uint8_t bRe
 
     // Wait for completion without holding device_mutex_ (the client task needs
     // it to deliver events). The transfer is never abandoned: if the device
-    // does not answer within two timeouts, request a recovery and keep waiting
-    // until the stack cancels the transfer as part of the port power-cycle.
+    // does not answer within STALL_AFTER_MS (NUT's USB timeout; UPSes can be
+    // slow while busy), request a recovery and keep waiting until the stack
+    // cancels the transfer as part of the port power-cycle.
     uint32_t waited_ms = 0;
     uint32_t next_report_ms = 30000;
-    int misses = 0;
+    bool warned = false, stalled = false;
     while (xSemaphoreTake(ctrl_done_sem_, pdMS_TO_TICKS(timeout_ms)) != pdTRUE) {
         waited_ms += timeout_ms;
-        misses++;
-        if (misses == 1) {
+        if (!warned) {
+            warned = true;
             ESP_LOGW(ESP32_USB_TAG, "%s: no response after %" PRIu32 "ms", what, waited_ms);
-        } else if (misses == 2) {
+        } else if (!stalled && waited_ms >= STALL_AFTER_MS) {
+            stalled = true;
             ctrl_stalls_++;
             ESP_LOGE(ESP32_USB_TAG, "%s: no response after %" PRIu32 "ms (stall #%" PRIu32 "), requesting USB port reset",
                      what, waited_ms, ctrl_stalls_.load());
             request_recovery("control transfer stalled");
-        } else if (waited_ms >= next_report_ms) {
+        } else if (stalled && waited_ms >= next_report_ms) {
             next_report_ms += 30000;
             ESP_LOGE(ESP32_USB_TAG, "%s: still waiting for the USB stack to cancel the stalled transfer (%" PRIu32 "s)",
                      what, waited_ms / 1000);
@@ -801,11 +806,14 @@ void Esp32UsbTransport::release_device_locked(usb_device_handle_t dev, usb_host_
     }
     usb_host_client_handle_events(cli, 0);
 
+    // Failures here matter: a device that is not closed is never freed, and the
+    // stack will not recover (or re-power) the port until it is.
     esp_err_t rel_ret = usb_host_interface_release(cli, dev, device_.interface_num);
-    ESP_LOGD(ESP32_USB_TAG, "  interface_release: %s", esp_err_to_name(rel_ret));
-
     esp_err_t close_ret = usb_host_device_close(cli, dev);
-    ESP_LOGD(ESP32_USB_TAG, "  device_close: %s", esp_err_to_name(close_ret));
+    if (rel_ret != ESP_OK || close_ret != ESP_OK) {
+        ESP_LOGW(ESP32_USB_TAG, "Device release: interface_release=%s device_close=%s",
+                 esp_err_to_name(rel_ret), esp_err_to_name(close_ret));
+    }
 }
 
 void Esp32UsbTransport::process_device_gone_locked() {
@@ -855,6 +863,7 @@ void Esp32UsbTransport::process_port_reset() {
         }
         port_resets_++;
         port_reset_started_ms_ = now;
+        port_reset_last_log_ms_ = now;
         port_powered_off_ = true;
         ESP_LOGW(ESP32_USB_TAG, "USB recovery #%" PRIu32 ": root port powered off", port_resets_.load());
         return;
@@ -875,16 +884,22 @@ void Esp32UsbTransport::process_port_reset() {
     }
 
     // The port can only be re-powered once the stack has recovered it, which
-    // happens after the old device object is freed; retry until it succeeds.
+    // happens after the old device object is freed. Retry until it succeeds:
+    // leaving the port off would silence the UPS for good. If it keeps failing
+    // the stack is wedged; report that so the component can reboot.
     esp_err_t ret = usb_host_lib_set_root_port_power(true);
     if (ret == ESP_OK) {
         port_powered_off_ = false;
+        port_power_stuck_ = false;
         recovery_requested_ = false;
         ESP_LOGI(ESP32_USB_TAG, "USB recovery: root port powered on, waiting for device re-enumeration");
     } else if (elapsed > PORT_RESET_MAX_MS) {
-        port_powered_off_ = false;
-        ESP_LOGE(ESP32_USB_TAG, "USB recovery: could not re-power root port after %" PRIu32 "s: %s",
-                 elapsed / 1000, esp_err_to_name(ret));
+        port_power_stuck_ = true;
+        if (now - port_reset_last_log_ms_ >= 15000) {
+            port_reset_last_log_ms_ = now;
+            ESP_LOGE(ESP32_USB_TAG, "USB recovery: still cannot re-power root port after %" PRIu32 "s: %s (device %s)",
+                     elapsed / 1000, esp_err_to_name(ret), device_closed ? "closed" : "still open");
+        }
     }
 #endif
 }
@@ -1029,10 +1044,15 @@ void Esp32UsbTransport::usb_client_task(void* arg) {
         }
 
         // Leave the event pending until the transport is ready to open devices
-        // (initialize() may still be finishing).
-        if (transport->new_device_pending_.load() && transport->initialized_.load() &&
-            !transport->port_powered_off_.load()) {
+        // (initialize() may still be finishing). A device enumerating while the
+        // port is believed to be off proves the port is powered after all.
+        if (transport->new_device_pending_.load() && transport->initialized_.load()) {
             transport->new_device_pending_ = false;
+            if (transport->port_powered_off_.exchange(false)) {
+                transport->port_power_stuck_ = false;
+                transport->recovery_requested_ = false;
+                ESP_LOGW(ESP32_USB_TAG, "USB device enumerated during recovery; treating root port as powered");
+            }
             uint8_t addr = transport->new_device_address_.load();
             std::lock_guard<std::mutex> lock(transport->device_mutex_);
             transport->handle_new_device_locked(addr);

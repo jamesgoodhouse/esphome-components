@@ -54,6 +54,9 @@ public:
     // transport's own task. is_connected() goes false while it runs.
     virtual void request_recovery(const char* reason) {}
     virtual bool is_recovering() const { return false; }
+    // A recovery was started but the transport could not complete it (the host
+    // stack itself is wedged, as opposed to the device not answering).
+    virtual bool is_recovery_stuck() const { return false; }
     virtual uint32_t get_recovery_count() const { return 0; }
     // Number of control transfers that got no response from the device.
     virtual uint32_t get_stall_count() const { return 0; }
