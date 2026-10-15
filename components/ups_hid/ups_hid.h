@@ -2,6 +2,7 @@
 
 #include "esphome/core/component.h"
 #include "esphome/core/defines.h"
+#include "esphome/core/hal.h"
 #include "esphome/core/helpers.h"
 #include "esphome/core/log.h"
 
@@ -198,16 +199,25 @@ namespace esphome
       void usb_task_sleep(uint32_t ms);
 
       // Recovery escalation: a transport recovery (USB root-port power cycle)
-      // is requested when the device stops responding; if several recoveries
-      // pass without a successful read, the ESP reboots as a last resort.
+      // is requested when the device stops responding, at most
+      // MAX_RECOVERIES_PER_OUTAGE times per outage (the UPS may simply be
+      // busy or off; power-cycling it endlessly does not help). The ESP only
+      // reboots when its own USB stack is wedged: the read task stays blocked
+      // despite a recovery, or the root port cannot be re-powered.
       std::atomic<uint32_t> recovery_attempts_{0};
       std::atomic<uint32_t> last_recovery_request_ms_{0};
+      uint32_t port_stuck_since_ms_{0};
       static constexpr uint32_t TASK_HUNG_MS = 60000;
       static constexpr uint32_t TASK_HUNG_REBOOT_MS = 180000;
       static constexpr uint32_t RECOVERY_MIN_INTERVAL_MS = 30000;
       static constexpr uint32_t DETECTION_FAILURES_PER_RECOVERY = 3;
-      static constexpr uint32_t MAX_RECOVERIES_BEFORE_REBOOT = 3;
-      static constexpr uint32_t REBOOT_AFTER_STALE_MS = 300000;
+      static constexpr uint32_t MAX_RECOVERIES_PER_OUTAGE = 3;
+      static constexpr uint32_t PORT_STUCK_REBOOT_MS = 120000;
+      static constexpr uint32_t CONNECT_SETTLE_MS = 2000;
+      bool can_request_recovery() const {
+        return recovery_attempts_.load() < MAX_RECOVERIES_PER_OUTAGE &&
+               millis() - last_recovery_request_ms_.load() > RECOVERY_MIN_INTERVAL_MS;
+      }
       void request_transport_recovery(const char *reason);
       void check_task_health();
       [[noreturn]] void reboot(const char *why);
@@ -220,6 +230,9 @@ namespace esphome
       static void nvs_task(void *param);
       void nvs_loop();
       void write_diagnostics_to_nvs();
+      // Logs and records the summary of a core dump left by a previous panic
+      // (only when the firmware is built with core dumps to flash enabled).
+      void record_core_dump_summary();
 
       // Command queue -- main loop pushes, background task executes.
       // Keeps all USB I/O off the main loop.

@@ -57,6 +57,7 @@ public:
 
     void request_recovery(const char* reason) override;
     bool is_recovering() const override { return port_powered_off_.load(); }
+    bool is_recovery_stuck() const override { return port_power_stuck_.load(); }
     uint32_t get_recovery_count() const override { return port_resets_.load(); }
     uint32_t get_stall_count() const override { return ctrl_stalls_.load(); }
 
@@ -114,7 +115,11 @@ private:
     // Root-port power-cycle recovery, driven by usb_client_task.
     std::atomic<bool> recovery_requested_{false};
     std::atomic<bool> port_powered_off_{false};
+    // Set when the root port could not be re-powered within PORT_RESET_MAX_MS;
+    // the stack is then considered wedged and the component may reboot.
+    std::atomic<bool> port_power_stuck_{false};
     uint32_t port_reset_started_ms_{0};
+    uint32_t port_reset_last_log_ms_{0};
     std::atomic<uint32_t> port_resets_{0};
 
     mutable std::mutex error_mutex_;
