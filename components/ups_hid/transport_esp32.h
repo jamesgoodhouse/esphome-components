@@ -59,6 +59,7 @@ public:
     bool is_recovering() const override { return port_powered_off_.load(); }
     bool is_recovery_stuck() const override { return port_power_stuck_.load(); }
     uint32_t get_recovery_count() const override { return port_resets_.load(); }
+    const char* get_last_transfer_status() const override { return last_fail_status_.load(); }
     uint32_t get_stall_count() const override { return ctrl_stalls_.load(); }
 
 private:
@@ -111,6 +112,8 @@ private:
     volatile usb_transfer_status_t ctrl_status_{USB_TRANSFER_STATUS_ERROR};
     volatile size_t ctrl_actual_bytes_{0};
     std::atomic<uint32_t> ctrl_stalls_{0};
+    std::atomic<uint32_t> ctrl_fail_streak_{0};
+    std::atomic<const char*> last_fail_status_{"none"};
 
     // Root-port power-cycle recovery, driven by usb_client_task.
     std::atomic<bool> recovery_requested_{false};

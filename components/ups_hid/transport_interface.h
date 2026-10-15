@@ -58,6 +58,8 @@ public:
     // stack itself is wedged, as opposed to the device not answering).
     virtual bool is_recovery_stuck() const { return false; }
     virtual uint32_t get_recovery_count() const { return 0; }
+    // USB status of the most recent failed control transfer, e.g. "STALL".
+    virtual const char* get_last_transfer_status() const { return "none"; }
     // Number of control transfers that got no response from the device.
     virtual uint32_t get_stall_count() const { return 0; }
 };

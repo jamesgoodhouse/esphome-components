@@ -270,6 +270,7 @@ esp_err_t Esp32UsbTransport::control_transfer(uint8_t bmRequestType, uint8_t bRe
 
     const usb_transfer_status_t status = ctrl_status_;
     if (status == USB_TRANSFER_STATUS_COMPLETED) {
+        ctrl_fail_streak_ = 0;
         if (is_in && data_len) {
             size_t received = ctrl_actual_bytes_ > sizeof(usb_setup_packet_t)
                 ? ctrl_actual_bytes_ - sizeof(usb_setup_packet_t) : 0;
@@ -282,7 +283,17 @@ esp_err_t Esp32UsbTransport::control_transfer(uint8_t bmRequestType, uint8_t bRe
         return ESP_OK;
     }
 
-    ESP_LOGD(ESP32_USB_TAG, "%s: failed, usb_status=%s", what, transfer_status_name(status));
+    // The status of the first failure in a streak says what the device is
+    // doing during an outage (STALL = request rejected, ERROR = bus error,
+    // TIMED_OUT = no handshake); worth a WARN since DEBUG is rarely enabled.
+    uint32_t streak = ++ctrl_fail_streak_;
+    last_fail_status_ = transfer_status_name(status);
+    if (streak == 1 || streak % 25 == 0) {
+        ESP_LOGW(ESP32_USB_TAG, "%s: failed, usb_status=%s (%" PRIu32 " consecutive failure%s)",
+                 what, transfer_status_name(status), streak, streak == 1 ? "" : "s");
+    } else {
+        ESP_LOGD(ESP32_USB_TAG, "%s: failed, usb_status=%s", what, transfer_status_name(status));
+    }
     if (status == USB_TRANSFER_STATUS_NO_DEVICE || status == USB_TRANSFER_STATUS_CANCELED) {
         return ESP_ERR_INVALID_STATE;
     }

@@ -585,6 +585,9 @@ bool TrippLiteProtocol::read_data_descriptor(UpsData &data) {
     // others succeed. Abort the cycle after several consecutive failures so an
     // unresponsive device does not hold the read task for long.
     static constexpr int MAX_CONSECUTIVE_FAILURES = 5;
+    // Breathing room between requests: low-speed UPS controllers can choke on
+    // back-to-back GET_REPORTs, and the whole cycle still takes under a second.
+    static constexpr uint32_t REPORT_GAP_MS = 20;
     std::map<uint8_t, std::vector<uint8_t>> report_cache;
     int reports_read = 0;
     int consecutive_failures = 0;
@@ -593,6 +596,7 @@ bool TrippLiteProtocol::read_data_descriptor(UpsData &data) {
 
     for (uint8_t rid : to_read) {
         if (!available_feature_reports_.count(rid)) continue;
+        if (reports_read + static_cast<int>(failed.size()) > 0) vTaskDelay(pdMS_TO_TICKS(REPORT_GAP_MS));
         HidReport report;
         if (read_hid_report(rid, report) && !report.data.empty()) {
             report_cache[rid] = std::move(report.data);

@@ -433,7 +433,8 @@ void UpsHidComponent::usb_read_loop() {
     process_pending_commands();
 
     usb_task_heartbeat_.store(millis());
-    if (read_ups_data()) {
+    bool read_ok = read_ups_data();
+    if (read_ok) {
       new_data_available_.store(true);
       consecutive_failures_ = 0;
       last_successful_read_ = millis();
@@ -451,7 +452,9 @@ void UpsHidComponent::usb_read_loop() {
         // Detection may keep succeeding on a device whose other reports have
         // stopped answering, so escalate to a port power-cycle here too.
         if (can_request_recovery()) {
-          request_transport_recovery("repeated read failures");
+          std::string reason = std::string("repeated read failures (usb_status=") +
+                               transport_->get_last_transfer_status() + ")";
+          request_transport_recovery(reason.c_str());
         }
       }
 
@@ -470,7 +473,9 @@ void UpsHidComponent::usb_read_loop() {
 
     read_and_update_timers();
 
-    usb_task_sleep(fast_polling_mode_ ? FAST_POLL_INTERVAL_MS : interval);
+    // After a failed read retry quickly, like a NUT driver does, so an outage
+    // is detected and recovered from before clients see the data go stale.
+    usb_task_sleep(!read_ok ? READ_RETRY_MS : fast_polling_mode_ ? FAST_POLL_INTERVAL_MS : interval);
   }
 }
 
